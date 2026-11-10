@@ -180,3 +180,11 @@ def test_conversation_history_persisted_and_scoped(user, other, llm):
     assert other.get(f"/api/ai/conversations/{cid}").status_code == 404
     assert other.post("/api/ai/chat", json={"message": "x", "conversation_id": cid}).status_code == 404
     assert user.delete(f"/api/ai/conversations/{cid}").status_code == 204
+
+
+def test_recent_actions_endpoint(user, other, llm):
+    llm(*prepare_turns())
+    user.post("/api/ai/chat", json={"message": "x"})
+    acts = user.get("/api/ai/actions").json()
+    assert len(acts) == 1 and acts[0]["tool_name"] == "create_invoice" and acts[0]["tool_result"]["status"] == "prepared"
+    assert other.get("/api/ai/actions").json() == []

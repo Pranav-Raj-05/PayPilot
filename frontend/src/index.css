@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { -webkit-font-smoothing: antialiased; }
+  body { @apply bg-canvas font-sans text-ink; }
+  h1, h2, h3 { @apply font-display; }
+  :focus-visible { @apply outline-2 outline-offset-2 outline-primary; }
+}
+
+@layer components {
+  .label-caps { @apply font-label text-[11px] font-semibold uppercase tracking-[0.05em] text-muted; }
+  .card { @apply rounded-2xl bg-white shadow-card; }
+  .input { @apply w-full rounded-xl bg-surface-low px-4 py-2.5 text-sm text-ink placeholder:text-muted/60 shadow-[inset_0_2px_4px_rgba(0,0,0,0.05)] outline-none ring-1 ring-transparent transition focus:ring-primary disabled:opacity-60; }
+  .th { @apply px-6 py-4 label-caps text-left; }
+  .td { @apply px-6 py-4 text-sm; }
+}

@@ -73,8 +73,15 @@ def delete_conversation(conversation_id: uuid.UUID, user: CurrentUser = Depends(
     db.delete(conv)
 
 
-class ActionDeps:
-    """Approval endpoints don't need an LLM, so they use a null provider."""
+@router.get("/actions")
+def recent_actions(limit: int = 8, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Most recent prepared/executed AI operations (for the assistant sidebar)."""
+    rows = db.scalars(
+        select(AIMessage).join(AIConversation, AIConversation.id == AIMessage.conversation_id)
+        .where(AIConversation.user_id == uuid.UUID(user.id), AIMessage.role == "tool")
+        .order_by(AIMessage.created_at.desc()).limit(min(max(limit, 1), 30) * 3)).all()
+    out = [MessageOut.model_validate(m).model_dump(mode="json") for m in rows if (m.tool_result or {}).get("status") in ("prepared", "approved", "executed", "failed", "cancelled")]
+    return out[:limit]
 
 
 def _agent(ctx: ToolContext) -> Agent:

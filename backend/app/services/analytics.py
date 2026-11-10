@@ -84,7 +84,7 @@ class AnalyticsService:
         return {
             "currency": currency, "currencies": self.currencies() or [currency], "days": days,
             "revenue": {"total": round(revenue, 2), "previous": round(prev_revenue, 2), "change_pct": _pct(revenue, prev_revenue),
-                        "series": series_cur, "previous_series": series_prev, "granularity": "month" if days > 90 else "day",
+                        "series": series_cur, "previous_series": series_prev, "granularity": "month" if days > 90 else "day", "start": start.date().isoformat(),
                         "daily_average": round(revenue / days, 2)},
             "transactions": {"total": total, "previous": len(prev), "change_pct": _pct(total, len(prev)), "processed_today": processed_today},
             "pending": {"total": round(pending_total, 2), "count": len(open_invoices), "overdue_count": len(overdue),

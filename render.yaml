@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: paypilot-api
+    runtime: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - { key: APP_ENV, value: production }
+      - { key: PAYPAL_BASE_URL, value: https://api-m.sandbox.paypal.com }
+      - { key: AI_PROVIDER, value: gemini }
+      - { key: FRONTEND_URL, sync: false }
+      - { key: BACKEND_URL, sync: false }
+      - { key: DATABASE_URL, sync: false }
+      - { key: SUPABASE_URL, sync: false }
+      - { key: SUPABASE_JWT_SECRET, sync: false }
+      - { key: PAYPAL_CLIENT_ID, sync: false }
+      - { key: PAYPAL_CLIENT_SECRET, sync: false }
+      - { key: PAYPAL_WEBHOOK_ID, sync: false }
+      - { key: RAZORPAY_KEY_ID, sync: false }
+      - { key: RAZORPAY_KEY_SECRET, sync: false }
+      - { key: RAZORPAY_WEBHOOK_SECRET, sync: false }
+      - { key: GEMINI_API_KEY, sync: false }
+      - { key: OPENAI_API_KEY, sync: false }
