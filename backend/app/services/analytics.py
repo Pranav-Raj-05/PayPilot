@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Invoice, Transaction
+from app.models import Invoice, PaymentLink, Transaction
 from app.services.common import aware, as_uuid
 from app.services.invoices import InvoiceService
 
@@ -161,3 +161,50 @@ class AnalyticsService:
             if 0 <= idx < n:
                 b[idx] += 1
         return b
+
+
+def money_sum(rows, attr) -> float:
+    return round(sum(float(getattr(r, attr)) for r in rows), 2)
+
+
+def invoice_summary(db: Session, user_id, currency: str | None = None) -> dict:
+    uid = as_uuid(user_id)
+    InvoiceService(db, uid).mark_overdue()
+    cur = AnalyticsService(db, uid).pick_currency(currency)
+    allrows = list(db.scalars(select(Invoice).where(Invoice.user_id == uid)).unique().all())
+    rows = [i for i in allrows if i.currency == cur]
+    by = lambda st: [i for i in rows if i.status in st]
+    return {
+        "currency": cur,
+        "counts": {"all": len(allrows), **{k: sum(1 for i in allrows if i.status == k) for k in ("paid", "pending", "overdue", "draft", "cancelled")}},
+        "total_invoiced": money_sum([i for i in rows if i.status != "cancelled"], "total_amount"),
+        "paid": {"total": money_sum(by({"paid"}), "total_amount"), "count": len(by({"paid"}))},
+        "pending": {"total": money_sum(by({"pending"}), "total_amount"), "count": len(by({"pending"}))},
+        "overdue": {"total": money_sum(by({"overdue"}), "total_amount"), "count": len(by({"overdue"}))},
+    }
+
+
+def transaction_summary(db: Session, user_id, currency: str | None = None) -> dict:
+    uid = as_uuid(user_id)
+    cur = AnalyticsService(db, uid).pick_currency(currency)
+    rows = list(db.scalars(select(Transaction).where(Transaction.user_id == uid, Transaction.currency == cur)).unique().all())
+    pick = lambda st: [t for t in rows if t.status in st]
+    done, failed = pick({"completed"}), pick({"failed"})
+    return {
+        "currency": cur, "total": {"volume": money_sum(rows, "amount"), "count": len(rows)},
+        "settled": {"total": money_sum(done, "amount"), "count": len(done),
+                    "rate": round(len(done) / (len(done) + len(failed)) * 100, 1) if done or failed else None},
+        "pending": {"total": money_sum(pick({"created", "pending"}), "amount"), "count": len(pick({"created", "pending"}))},
+        "failed": {"total": money_sum(failed, "amount"), "count": len(failed)},
+        "refunded": {"total": money_sum(pick({"refunded"}), "amount"), "count": len(pick({"refunded"}))},
+    }
+
+
+def link_summary(db: Session, user_id, currency: str | None = None) -> dict:
+    uid = as_uuid(user_id)
+    cur = AnalyticsService(db, uid).pick_currency(currency)
+    links = list(db.scalars(select(PaymentLink).where(PaymentLink.user_id == uid)).all())
+    paid = [l for l in links if l.status == "paid"]
+    return {"currency": cur, "total": len(links), "active": sum(1 for l in links if l.status == "active"), "paid": len(paid),
+            "paid_volume": round(sum(float(l.amount) for l in paid if l.currency == cur), 2),
+            "conversion_rate": round(len(paid) / len(links) * 100, 1) if links else None}

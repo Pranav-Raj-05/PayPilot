@@ -4,6 +4,7 @@ import { ArrowUp, BarChart3, Bell, Bot, CheckCircle2, FileText, History, Link2, 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { ActionCard } from "@/components/assistant/ActionCards";
+import { ExecutionPlan } from "@/components/assistant/ExecutionPlan";
 import { ReadResult } from "@/components/assistant/ToolResults";
 import { Avatar, Button, Card, ErrorState } from "@/components/ui";
 import { useAutomations, useConversations, useDashboard, usePayPalStatus, useProfile, useRecentActions, useSettings } from "@/hooks/queries";
@@ -53,7 +54,10 @@ function Bubble({ msg, busyId, onConfirm, onCancel, onEdit, name }: { msg: ChatM
         {msg.role === "assistant" && <div className="whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white p-4 text-sm leading-relaxed shadow-card">{msg.content}</div>}
         {msg.role === "tool" && msg.tool_result?.status === "read" && <ReadResult msg={msg} />}
         {msg.role === "tool" && msg.tool_result && msg.tool_result.status !== "read" && (
-          <ActionCard msg={msg} busy={busyId === msg.id} onConfirm={() => onConfirm(msg.id)} onCancel={() => onCancel(msg.id)} onEdit={onEdit} />
+          <div className="space-y-3">
+            <ActionCard msg={msg} busy={busyId === msg.id} onConfirm={() => onConfirm(msg.id)} onCancel={() => onCancel(msg.id)} onEdit={onEdit} />
+            {msg.tool_name === "create_invoice" && msg.tool_result.status !== "cancelled" && <ExecutionPlan msg={msg} />}
+          </div>
         )}
       </div>
     </div>

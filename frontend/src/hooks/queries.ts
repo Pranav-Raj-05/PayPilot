@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { del, get, patch, post } from "@/lib/api";
-import type { Analytics, Automation, ChatMessage, Conversation, Customer, Dashboard, Invoice, Notification, Page, PayPalStatus, PaymentLink, Profile, Settings, Transaction } from "@/types";
+import type { Activity, InvoiceSummary, LinkSummary, TxSummary, Analytics, Automation, ChatMessage, Conversation, Customer, Dashboard, Invoice, Notification, Page, PayPalStatus, PaymentLink, Profile, Settings, Transaction } from "@/types";
 
 export const useDashboard = (days: number, currency?: string) =>
   useQuery({ queryKey: ["dashboard", days, currency], queryFn: () => get<Dashboard>("/api/dashboard", { days, currency }), refetchInterval: 30_000 });
@@ -10,7 +10,7 @@ export const useTransactions = (params: Record<string, unknown>) =>
   useQuery({ queryKey: ["transactions", params], queryFn: () => get<Page<Transaction>>("/api/transactions", params), placeholderData: keepPreviousData });
 export const useInvoices = (params: Record<string, unknown>) =>
   useQuery({ queryKey: ["invoices", params], queryFn: () => get<Page<Invoice>>("/api/invoices", params), placeholderData: keepPreviousData });
-export const useInvoice = (id?: string) => useQuery({ queryKey: ["invoice", id], queryFn: () => get<Invoice>(`/api/invoices/${id}`), enabled: !!id });
+export const useInvoice = (id?: string, poll = false) => useQuery({ queryKey: ["invoice", id], queryFn: () => get<Invoice>(`/api/invoices/${id}`), enabled: !!id, refetchInterval: poll ? 10_000 : false });
 export const useCustomers = (search?: string) =>
   useQuery({ queryKey: ["customers", search], queryFn: () => get<Page<Customer>>("/api/customers", { search, page_size: 100 }) });
 export const usePaymentLinks = () => useQuery({ queryKey: ["links"], queryFn: () => get<PaymentLink[]>("/api/payment-links") });
@@ -40,3 +40,9 @@ export const useDeleteCustomer = () => useInvalidating((id: string) => del(`/api
 export const useUpdateAutomation = () => useInvalidating(({ id, ...b }: { id: string } & Record<string, unknown>) => patch<Automation>(`/api/automations/${id}`, b), ["automations"]);
 export const useRunAutomation = () => useInvalidating((id: string) => post<{ result: string }>(`/api/automations/${id}/run`), ["automations", "notifications"]);
 export const useUpdateProfile = () => useInvalidating((b: object) => patch<Profile>("/api/settings/profile", b), ["settings", "me"]);
+
+export const useInvoiceSummary = () => useQuery({ queryKey: ["invoices", "summary"], queryFn: () => get<InvoiceSummary>("/api/invoices/summary") });
+export const useTxSummary = () => useQuery({ queryKey: ["transactions", "summary"], queryFn: () => get<TxSummary>("/api/transactions/summary"), refetchInterval: 15_000 });
+export const useLinkSummary = () => useQuery({ queryKey: ["links", "summary"], queryFn: () => get<LinkSummary>("/api/payment-links/summary") });
+export const useInvoiceActivity = (id?: string) => useQuery({ queryKey: ["invoice", id, "activity"], queryFn: () => get<Activity[]>(`/api/invoices/${id}/activity`), enabled: !!id });
+export const useRefund = () => useInvalidating((id: string) => post<Transaction>(`/api/transactions/${id}/refund`), ["transactions", "dashboard", "invoices", "invoice", "notifications", "analytics"]);

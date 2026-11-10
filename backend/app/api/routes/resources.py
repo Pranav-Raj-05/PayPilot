@@ -10,11 +10,13 @@ from app.core.db import get_db
 from app.core.errors import AppError
 from app.core.ratelimit import rate_limit
 from app.core.security import CurrentUser, get_current_user
-from app.models import PaymentLink
+from app.models import AuditLog, PaymentLink, Transaction
+from sqlalchemy import select as sa_select
 from app.repositories import PaymentLinkRepo
 from app.schemas.common import Page
 from app.schemas.entities import (CustomerIn, CustomerOut, CustomerUpdate, InvoiceIn, InvoiceOut, InvoiceUpdate, PaymentLinkIn, PaymentLinkOut, TransactionOut)
-from app.services.common import audit
+from app.services.analytics import invoice_summary, link_summary, transaction_summary
+from app.services.common import as_uuid, audit
 from app.services.customers import CustomerService
 from app.services.invoices import InvoiceService
 from app.services.payments import PaymentService
@@ -57,6 +59,28 @@ def delete_customer(customer_id: str, user: CurrentUser = Depends(get_current_us
 
 
 # ---------------------------------------------------------------- invoices
+@invoices_router.get("/summary")
+def invoices_summary(currency: str | None = None, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    return invoice_summary(db, user.id, currency)
+
+
+@invoices_router.get("/{invoice_id}/activity")
+def invoice_activity(invoice_id: str, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Audit trail for one invoice: audit log entries + the payment lifecycle of its transactions."""
+    inv = InvoiceService(db, user.id).get(invoice_id)
+    labels = {"invoice.create": "Invoice created", "invoice.update": "Invoice updated", "paypal.order_created": "PayPal order created", "razorpay.order_created": "Razorpay order created"}
+    out = []
+    for a in db.scalars(sa_select(AuditLog).where(AuditLog.user_id == as_uuid(user.id), AuditLog.entity_type == "invoice", AuditLog.entity_id == str(inv.id))).all():
+        out.append({"title": labels.get(a.action, a.action), "detail": None, "at": a.created_at.isoformat(), "done": True})
+    for t in db.scalars(sa_select(Transaction).where(Transaction.user_id == as_uuid(user.id), Transaction.invoice_id == inv.id)).unique().all():
+        for e in t.events or []:
+            out.append({"title": e["type"].replace("_", " ").capitalize(), "detail": e.get("detail"), "at": e["at"], "done": True})
+    out.sort(key=lambda x: x["at"])
+    if inv.status in ("pending", "overdue"):
+        out.append({"title": "Awaiting customer payment", "detail": "Funds are credited only after a verified capture", "at": None, "done": False})
+    return out
+
+
 @invoices_router.get("", response_model=Page[InvoiceOut])
 def list_invoices(status: str | None = None, search: str | None = None, page: PageNo = 1, page_size: PageSize = 50,
                   user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -93,6 +117,16 @@ def create_invoice_payment_link(invoice_id: str, provider: Literal["paypal", "ra
 
 
 # ---------------------------------------------------------------- transactions
+@transactions_router.get("/summary")
+def transactions_summary(currency: str | None = None, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    return transaction_summary(db, user.id, currency)
+
+
+@transactions_router.post("/{transaction_id}/refund", response_model=TransactionOut, dependencies=[Depends(rate_limit("refund", 10))])
+def refund_transaction(transaction_id: str, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
+    return payments.refund_paypal(transaction_id, user.id)
+
+
 @transactions_router.get("", response_model=Page[TransactionOut])
 def list_transactions(search: str | None = None, status: str | None = None, provider: str | None = None,
                       sort: Literal["created_at", "amount", "status"] = "created_at", order: Literal["asc", "desc"] = "desc",
@@ -107,6 +141,11 @@ def get_transaction(transaction_id: str, user: CurrentUser = Depends(get_current
 
 
 # ---------------------------------------------------------------- payment links
+@links_router.get("/summary")
+def links_summary(currency: str | None = None, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    return link_summary(db, user.id, currency)
+
+
 @links_router.get("", response_model=list[PaymentLinkOut])
 def list_links(user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     repo = PaymentLinkRepo(db, user.id)

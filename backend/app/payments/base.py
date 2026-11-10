@@ -20,4 +20,6 @@ class CaptureResult:
     currency: str | None = None
     payment_method: str | None = None
     reason: str | None = None
+    fee: Decimal | None = None
+    net: Decimal | None = None
     raw: dict = field(default_factory=dict)

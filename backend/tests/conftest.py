@@ -65,6 +65,9 @@ class FakeProviders:
         if path.startswith("/v2/checkout/orders/") and method == "GET":
             oid = path.split("/")[-1]
             return httpx.Response(200, json=self._order_json(oid)) if oid in self.orders else httpx.Response(404, json={})
+        if path.startswith("/v2/payments/captures/") and path.endswith("/refund"):
+            self.refund_calls = getattr(self, "refund_calls", 0) + 1
+            return httpx.Response(201, json={"id": "REF1", "status": getattr(self, "refund_status", "COMPLETED")})
         if path == "/v1/notifications/verify-webhook-signature":
             return httpx.Response(200, json={"verification_status": "SUCCESS" if self.webhook_valid else "FAILURE"})
         # Razorpay
@@ -85,7 +88,8 @@ class FakeProviders:
         out = {"id": oid, "status": o["status"], "payment_source": {"paypal": {}}}
         if o["status"] == "COMPLETED":
             out["purchase_units"] = [{"payments": {"captures": [{"id": f"CAP-{oid}", "status": "DECLINED" if self.capture_mode == "declined" else "COMPLETED",
-                                                                  "amount": {"currency_code": amt["currency_code"], "value": value}}]}}]
+                                                                  "amount": {"currency_code": amt["currency_code"], "value": value},
+                                                                  "seller_receivable_breakdown": {"paypal_fee": {"value": "14.80", "currency_code": amt["currency_code"]}, "net_amount": {"value": f"{float(value) - 14.80:.2f}", "currency_code": amt["currency_code"]}}}]}}]
         return out
 
 

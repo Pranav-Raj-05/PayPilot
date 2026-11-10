@@ -107,6 +107,13 @@ class PayPalClient:
             return CaptureResult(status="failed", order_id=order_id, reason=f"Payment declined ({issue})")
         raise ProviderError("PayPal capture failed", details=_err(r))
 
+    def refund_capture(self, capture_id: str, request_id: str) -> str:
+        """Full refund of a capture. Returns PayPal's refund status (COMPLETED | PENDING | ...)."""
+        r = self._request("POST", f"/v2/payments/captures/{capture_id}/refund", json={}, request_id=request_id)
+        if r.status_code not in (200, 201):
+            raise ProviderError("PayPal could not refund this payment", details=_err(r))
+        return r.json().get("status", "PENDING")
+
     # ---- Webhooks
     def verify_webhook(self, headers: dict[str, str], event: dict) -> bool:
         self._require()
@@ -152,6 +159,9 @@ def parse_capture(order: dict) -> CaptureResult:
     st = cap.get("status", "")
     mapped = {"COMPLETED": "completed", "PENDING": "pending"}.get(st, "failed")
     method = "paypal" if "paypal" in (order.get("payment_source") or {}) else next(iter(order.get("payment_source") or {}), "paypal")
-    return CaptureResult(status=mapped, order_id=oid, capture_id=cap.get("id"),
+    brk = cap.get("seller_receivable_breakdown") or {}
+    fee = Decimal(brk["paypal_fee"]["value"]) if brk.get("paypal_fee") else None
+    net = Decimal(brk["net_amount"]["value"]) if brk.get("net_amount") else None
+    return CaptureResult(status=mapped, order_id=oid, capture_id=cap.get("id"), fee=fee, net=net,
                          amount=Decimal(cap["amount"]["value"]), currency=cap["amount"]["currency_code"],
                          payment_method=method, reason=None if mapped != "failed" else f"Capture {st}", raw=order)

@@ -23,15 +23,15 @@ uvicorn app.main:app --reload            # http://localhost:8000/docs
 # 3. Frontend
 cd ../frontend && cp .env.example .env && npm install && npm run dev   # http://localhost:5173
 ```
-Tests: `cd backend && pytest -q` (59 tests, providers mocked) · `cd frontend && npm test && npm run build`.
+Tests: `cd backend && pytest -q` (63 tests, providers mocked) · `cd frontend && npm test && npm run build`.
 
 ## Docs
 [Architecture](docs/architecture.md) · [API](docs/api-documentation.md) · [Deployment](docs/deployment.md) · [Manual sandbox testing](docs/manual-testing.md)
 
 ## Design fidelity & honesty notes
-* The Figma file contains two designed screens (Overview, AI Assistant) — those follow it closely (tokens, layout, copy, components). Other pages reuse the same tokens but are **not** from Figma.
+* The Figma file has six frames: Overview, AI Assistant, Invoice Management, Transactions Management, Payment Links Hub and the AI Execution Timeline. All six are implemented against real data. Customers, Analytics, Automations, Settings and auth screens are not in Figma and reuse the same tokens.
 * Figma's exported SVG/photo assets sit on a host the build environment could not reach, so icons are Lucide and avatars are initials.
-* Figma showed illustrative values (simulated balance, “Fraud & Risk Guard”, “Level 3”, “Switch to Live”, attachments/mic). Anything without a real backend was replaced with real data or disabled rather than faked.
+* Figma showed illustrative values (simulated balance, “Fraud & Risk Guard”, “Level 3”, “Switch to Live”, PayLater/Venmo toggles, tax receipt/resend email, attachments/mic, “Simulate webhook”, per-link checkout counts, Linear milestone suggestion). Anything without a real backend was replaced with real data or disabled rather than faked.
 * No AI token streaming; AI replies arrive when the tool loop finishes.
 * The SQL migrations were syntax-checked with a Postgres parser but not executed against a live Supabase project in this build, and live PayPal/Razorpay/LLM calls were verified only against mocks — run `docs/manual-testing.md` with real sandbox keys before the demo.
 

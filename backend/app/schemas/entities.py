@@ -154,6 +154,8 @@ class TransactionOut(ORM):
     currency: str
     status: str
     payment_method: str | None
+    fee_amount: Money | None = None
+    net_amount: Money | None = None
     failure_reason: str | None
     events: list
     created_at: datetime

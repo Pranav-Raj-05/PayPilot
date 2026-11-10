@@ -14,7 +14,7 @@ export interface TxEvent { type: string; at: string; detail: string | null }
 export interface Transaction {
   id: string; customer_id: string | null; customer: CustomerRef | null; invoice_id: string | null; invoice_number: string | null;
   provider: "paypal" | "razorpay"; provider_order_id: string | null; provider_capture_id: string | null; amount: Money; currency: string;
-  status: TxStatus; payment_method: string | null; failure_reason: string | null; events: TxEvent[]; created_at: string; updated_at: string;
+  status: TxStatus; payment_method: string | null; fee_amount?: Money | null; net_amount?: Money | null; failure_reason: string | null; events: TxEvent[]; created_at: string; updated_at: string;
 }
 export interface PaymentLink {
   id: string; customer_id: string | null; customer: CustomerRef | null; invoice_id: string | null; provider: "paypal" | "razorpay";
@@ -49,3 +49,9 @@ export interface ChatMessage {
   tool_result: null | { status: ActionStatus; args?: Record<string, unknown>; preview?: any; result?: any; error?: string };
 }
 export interface Conversation { id: string; title: string; created_at: string; updated_at: string }
+
+export interface Bucket { total: Money; count: number }
+export interface InvoiceSummary { currency: string; counts: Record<string, number>; total_invoiced: Money; paid: Bucket; pending: Bucket; overdue: Bucket }
+export interface TxSummary { currency: string; total: { volume: Money; count: number }; settled: Bucket & { rate: number | null }; pending: Bucket; failed: Bucket; refunded: Bucket }
+export interface LinkSummary { currency: string; total: number; active: number; paid: number; paid_volume: Money; conversion_rate: number | null }
+export interface Activity { title: string; detail: string | null; at: string | null; done: boolean }

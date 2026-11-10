@@ -167,3 +167,40 @@ def test_webhook_refund(client, user, invoice, providers):
     assert hook(client, ev).status_code == 200
     assert user.get("/api/transactions").json()["items"][0]["status"] == "refunded"
     assert user.get(f"/api/invoices/{invoice['id']}").json()["status"] == "pending"
+
+
+def test_capture_records_fee_and_net(user, invoice):
+    o = create(user, invoice)
+    t = user.post("/api/payments/paypal/capture-order", json={"order_id": o["order_id"]}).json()["transaction"]
+    assert t["fee_amount"] == 14.8 and t["net_amount"] == 485.2
+
+
+def test_refund_flow_idempotent_and_owned(user, other, invoice, providers):
+    o = create(user, invoice)
+    t = user.post("/api/payments/paypal/capture-order", json={"order_id": o["order_id"]}).json()["transaction"]
+    assert other.post(f"/api/transactions/{t['id']}/refund").status_code == 404
+    r = user.post(f"/api/transactions/{t['id']}/refund").json()
+    assert r["status"] == "refunded"
+    assert user.post(f"/api/transactions/{t['id']}/refund").json()["status"] == "refunded"
+    assert providers.refund_calls == 1
+    assert user.get(f"/api/invoices/{invoice['id']}").json()["status"] == "pending"
+
+
+def test_refund_only_completed(user, invoice):
+    o = create(user, invoice)
+    tid = user.get("/api/transactions").json()["items"][0]["id"]
+    assert user.post(f"/api/transactions/{tid}/refund").status_code == 409
+
+
+def test_summaries_and_activity(user, invoice):
+    o = create(user, invoice)
+    s = user.get("/api/invoices/summary").json()
+    assert s["counts"]["pending"] == 1 and s["pending"]["total"] == 500 and s["total_invoiced"] == 500
+    act = user.get(f"/api/invoices/{invoice['id']}/activity").json()
+    assert [a["title"] for a in act][0] == "Invoice created" and act[-1]["done"] is False
+    user.post("/api/payments/paypal/capture-order", json={"order_id": o["order_id"]})
+    assert user.get("/api/invoices/summary").json()["paid"] == {"total": 500, "count": 1}
+    ts = user.get("/api/transactions/summary").json()
+    assert ts["settled"]["total"] == 500 and ts["settled"]["rate"] == 100.0
+    ls = user.get("/api/payment-links/summary").json()
+    assert ls["total"] == 1 and ls["paid"] == 1 and ls["conversion_rate"] == 100.0

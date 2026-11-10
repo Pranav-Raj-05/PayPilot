@@ -108,6 +108,8 @@ class Transaction(Base):
     currency: Mapped[str] = mapped_column(String(3))
     status: Mapped[str] = mapped_column(String(20), default="created")  # created|pending|completed|failed|refunded|cancelled
     payment_method: Mapped[str | None] = mapped_column(String(50))
+    fee_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    net_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     events: Mapped[list] = mapped_column(JSON, default=list)  # lifecycle timeline
     created_at: Mapped[datetime] = _created()

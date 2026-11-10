@@ -110,6 +110,23 @@ class PaymentService:
         self.apply_capture(txn, result)
         return txn
 
+    def refund_paypal(self, txn_id, user_id) -> Transaction:
+        txn = TransactionRepo(self.db, user_id).get(txn_id)
+        txn = self.db.scalars(select(Transaction).where(Transaction.id == txn.id).with_for_update()).unique().one()
+        if txn.provider != "paypal":
+            raise AppError("Refunds are only supported for PayPal payments here", code="unsupported", status_code=400)
+        if txn.status == "refunded":
+            return txn
+        if txn.status != "completed" or not txn.provider_capture_id:
+            raise Conflict("Only completed payments can be refunded")
+        status = self.paypal.refund_capture(txn.provider_capture_id, request_id=f"refund-{txn.id}")
+        audit(self.db, user_id, "paypal.refund", "transaction", txn.id, {"status": status})
+        if status == "COMPLETED":
+            self.apply_refund(txn)
+        else:
+            add_event(txn, "refund_pending", f"PayPal refund status {status}")
+        return txn
+
     def _assert_payable(self, txn: Transaction) -> None:
         if txn.status == "cancelled":
             raise Conflict("This payment was cancelled")
@@ -153,6 +170,7 @@ class PaymentService:
             txn.status, txn.provider_capture_id = "completed", result.capture_id
             txn.payment_method = result.payment_method or txn.payment_method
             txn.failure_reason = None
+            txn.fee_amount, txn.net_amount = result.fee, result.net
             add_event(txn, "captured", f"Capture {result.capture_id}")
             if txn.invoice_id:
                 inv = self.db.get(Invoice, txn.invoice_id)

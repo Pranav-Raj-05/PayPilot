@@ -99,6 +99,8 @@ create table public.transactions (
   currency char(3) not null,
   status text not null default 'created' check (status in ('created','pending','completed','failed','refunded','cancelled')),
   payment_method text,
+  fee_amount numeric(14,2),
+  net_amount numeric(14,2),
   failure_reason text,
   events jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
