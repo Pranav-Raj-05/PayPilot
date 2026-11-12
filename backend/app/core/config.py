@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # AI
     ai_provider: str = "gemini"  # gemini | openai
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.5-flash"  # gemini-2.5-flash is no longer available to new API keys
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
     openai_base_url: str = "https://api.openai.com/v1"

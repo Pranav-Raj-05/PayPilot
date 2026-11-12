@@ -20,12 +20,19 @@ What is validated
 4. The port is ALWAYS passed explicitly (the URL's port, else 5432). libpq would otherwise fall back to ``PGPORT``, i.e. an inherited
    environment variable could pick the destination of an otherwise validated ``localhost`` URL. ``database_url`` and ``normalize_url``
    (used for SQLAlchemy engines, which also omit a missing port) render the explicit port too.
-5. Environment policy (see ``TARGET_ENV_VARS`` / ``PERMITTED_ENV_VARS``). libpq reads ~40 ``PG*`` variables. Those that choose WHERE the
-   connection goes, WHICH database it opens, or that change the session behind the test's back must be UNSET (presence, even an empty
-   value, is a refusal): ``PGHOST``, ``PGHOSTADDR``, ``PGPORT``, ``PGDATABASE``, ``PGSERVICE``, ``PGSERVICEFILE``, ``PGOPTIONS``. They are
-   re-checked immediately before the driver is called. Variables that only affect authentication, TLS, encoding or timing cannot change
+5. Environment policy (see ``TARGET_ENV_VARS`` / ``CREDENTIAL_FORWARDING_ENV_VARS`` / ``PERMITTED_ENV_VARS``). libpq reads ~40 ``PG*``
+   variables, and the set depends on the libpq version (the Windows wheel of psycopg bundles libpq 14, the Linux wheel libpq 17).
+   Variables that choose WHERE the connection goes, WHICH database it opens, or that change the session behind the test's back must be
+   UNSET (presence, even an empty value, is a refusal): ``PGHOST``, ``PGHOSTADDR``, ``PGPORT``, ``PGDATABASE``, ``PGSERVICE``,
+   ``PGSERVICEFILE``, ``PGOPTIONS``. So must the variable that FORWARDS the user's Kerberos credentials to whatever server answers
+   (``PGGSSDELEGATION``): it cannot redirect the connection, but it would hand credentials over before the server check in step 6 can
+   notice a tunnel, and nothing in this project needs it. They are re-checked immediately before the driver is called.
+   FAIL CLOSED: any ``PG*`` variable that the installed libpq reports but that is in none of the lists is refused when present, and a test
+   fails until it is classified, so a newer libpq cannot add a redirecting variable unnoticed.
+   Variables that only affect authentication, TLS, encoding or timing cannot change
    the destination (host, port and database are explicit arguments, and exactly one host is allowed), so they are permitted:
-   ``PGUSER``, ``PGPASSWORD``, ``PGPASSFILE``, ``PGSSL*``, ``PGGSSENCMODE``, ``PGKRBSRVNAME``, ``PGREQUIREAUTH``, ``PGCHANNELBINDING``,
+   ``PGUSER``, ``PGPASSWORD``, ``PGPASSFILE``, ``PGSSL*`` (including ``PGSSLCERTMODE``, whether a client certificate is sent, and
+   ``PGSSLNEGOTIATION``, how the TLS handshake starts), ``PGREQUIRESSL`` (deprecated), ``PGGSSENCMODE``, ``PGKRBSRVNAME``, ``PGREQUIREAUTH``, ``PGCHANNELBINDING``,
    ``PGREQUIREPEER``, ``PGGSSLIB``, ``PGCONNECT_TIMEOUT``, ``PGCLIENTENCODING``, ``PGAPPNAME``, ``PGTZ``, ``PGDATESTYLE``, ``PGGEQO``, ``PGSYSCONFDIR`` (only locates the
    service file, which is refused anyway), ``PGTARGETSESSIONATTRS`` and ``PGLOADBALANCEHOSTS`` (only meaningful with several hosts, which
    are refused). A permitted variable can make a connection fail; it cannot make it go somewhere else.
@@ -58,8 +65,12 @@ ALLOWED_SCHEMES = ("postgresql", "postgres")
 ALLOWED_QUERY_KEYS = ("sslmode", "connect_timeout", "application_name")
 DEFAULT_PORT = 5432
 TARGET_ENV_VARS = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS")
+# Cannot redirect the connection, but would hand the user's Kerberos credentials to whatever server answers (libpq 16+: gssdelegation).
+CREDENTIAL_FORWARDING_ENV_VARS = ("PGGSSDELEGATION",)
+REFUSED_ENV_VARS = TARGET_ENV_VARS + CREDENTIAL_FORWARDING_ENV_VARS
 PERMITTED_ENV_VARS = ("PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSSLMODE", "PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT", "PGSSLCRL", "PGSSLCRLDIR",
                       "PGSSLSNI", "PGSSLCOMPRESSION", "PGSSLMINPROTOCOLVERSION", "PGSSLMAXPROTOCOLVERSION", "PGGSSENCMODE", "PGKRBSRVNAME",
+                      "PGSSLCERTMODE", "PGSSLNEGOTIATION", "PGREQUIRESSL",  # libpq 16 / 17 / deprecated: TLS client-cert and handshake behaviour only
                       "PGREQUIREAUTH", "PGCHANNELBINDING", "PGCONNECT_TIMEOUT", "PGCLIENTENCODING", "PGAPPNAME", "PGTZ", "PGDATESTYLE", "PGGEQO",
                       "PGSYSCONFDIR", "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS", "PGREQUIREPEER", "PGGSSLIB")
 SERVER_DATABASES = ("postgres", "template0", "template1")
@@ -121,11 +132,29 @@ def redact(url: str) -> str:
     return f"{host}{port}/{u.database or ''}"
 
 
+def libpq_reported_env_vars() -> set[str]:
+    """Every environment variable the INSTALLED libpq says it reads (psycopg asks libpq itself, so it follows the bundled libpq version)."""
+    from psycopg import pq
+
+    return {o.envvar.decode() for o in pq.Conninfo.get_defaults() if o.envvar}
+
+
+def unclassified_libpq_env_vars(reported: set[str] | None = None) -> list[str]:
+    """Variables libpq reads that are in none of the three lists. Anything returned here has not been reviewed, so it is treated as unsafe."""
+    known = set(REFUSED_ENV_VARS) | set(PERMITTED_ENV_VARS)
+    return sorted((libpq_reported_env_vars() if reported is None else reported) - known)
+
+
 def assert_clean_environment(where: str = "the connection") -> None:
-    """Refuse when a libpq variable that selects the target (or alters the session) is present. Names only are reported, never values."""
-    present = [var for var in TARGET_ENV_VARS if os.environ.get(var) is not None]  # presence, not truthiness: libpq honours an empty value too
+    """Refuse when a libpq variable that selects the target, alters the session or forwards credentials is present, or when ANY variable
+    the installed libpq reads is present without having been classified (fail closed). Names only are reported, never values."""
+    present = [var for var in REFUSED_ENV_VARS if os.environ.get(var) is not None]  # presence, not truthiness: libpq honours an empty value too
     if present:
         raise UnsafeDatabaseTarget(f"refusing {where}: environment variable(s) {', '.join(present)} can redirect or alter the connection; unset them")
+    unknown = [var for var in unclassified_libpq_env_vars() if os.environ.get(var) is not None]
+    if unknown:
+        raise UnsafeDatabaseTarget(f"refusing {where}: environment variable(s) {', '.join(unknown)} are read by libpq but have not been classified in "
+                                   "pg_safety.py; unset them (or classify them after review)")
 
 
 def _effective_port(u) -> int:

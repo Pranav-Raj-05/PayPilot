@@ -41,7 +41,7 @@ React 18, TypeScript, Vite, Tailwind CSS, TanStack Query, Python 3.12, FastAPI, 
 
 ## Known limitations (state these honestly)
 - Sandbox only; live PayPal has not been used.
-- The AI assistant requires an operator-supplied Gemini/OpenAI key, and has no token streaming.
+- The AI assistant requires an operator-supplied Gemini/OpenAI key, and has no token streaming. A free Gemini key is limited to about 20 requests per model per day, which the assistant reports as a quota error when exhausted.
 - Payment reminders are drafted for approval; **no email/SMS is sent**.
 - Razorpay is test-mode only with no refunds.
 - PayPal refund/reversal webhook payload shapes were not verified against live Sandbox events.
@@ -55,6 +55,7 @@ React 18, TypeScript, Vite, Tailwind CSS, TanStack Query, Python 3.12, FastAPI, 
 - Production build: `npm run build` — **succeeded**.
 - Backend starts and serves: `/health` 200, `/docs` 200, protected routes return 401 without a token, CORS allows the dev origin (checked on a scratch SQLite database).
 - Frontend dev server starts and serves HTTP 200.
+- AI assistant, verified by a live Gemini session earlier in development (model `gemini-3.5-flash`) and by 27 automated AI tests: transaction summary via `list_transactions`, invoice prepared and created only after approval, payment-link action prepared and cancelled with no PayPal request, no key in logs. Not re-verified live on the final run because the free-tier daily quota was exhausted (HTTP 429).
 - **Not verified by me:** the PayPal Sandbox payment flow end to end (it needs your authenticated session and the PayPal buyer login; you reported it working), the AI assistant with a real LLM key, and any deployment.
 
 ## Manual actions before submitting

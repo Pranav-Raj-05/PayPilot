@@ -6,6 +6,8 @@ Everything shown must be real. **Do a dry run first** and cut any segment that f
 - [ ] Backend and frontend running (or the deployed URLs open). `http://localhost:8000/health` returns `{"status":"ok"...}`.
 - [ ] Signed in to PayPilot with a demo account; one customer exists (e.g. "Sarah Johnson").
 - [ ] PayPal **Sandbox** buyer account credentials ready (developer.paypal.com → Testing Tools → Sandbox Accounts). Do not show the secret on screen.
+- [ ] **Gemini quota:** a free key allows only about 20 requests per day per model and each assistant turn uses 2 or more. Do not rehearse the AI segment repeatedly; record it once or twice. If you see "rate limit or quota was reached", wait, set `GEMINI_MODEL` to another model (for example `gemini-3.1-flash-lite`), or enable billing.
+- [ ] The key must be in **`D:\PayPilot-clone-temp\backend\.env`** (the folder the running backend uses) and the backend restarted.
 - [ ] **AI check:** open the AI Assistant and send "list my customers". If it answers, the AI segment is real. If it says AI is not configured, set `GEMINI_API_KEY` (or `OPENAI_API_KEY`) in `backend/.env` and restart the backend, or **skip segment 2 and do not mention AI as a working feature**.
 - [ ] Browser zoom 110–125%, notifications off, `.env` files and the PayPal dashboard's secret page not visible, no real personal data on screen.
 

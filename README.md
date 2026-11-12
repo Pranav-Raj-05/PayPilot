@@ -27,6 +27,15 @@ Small businesses chase payments by hand: write an invoice, create a payment link
 * The model can only call registered, typed tools, each scoped to the signed-in user. Data-changing tools return a preview (`prepared_awaiting_user_approval`); execution happens only through the approval endpoint after the user confirms.
 * **Requires your own `GEMINI_API_KEY` or `OPENAI_API_KEY`.** Without one the assistant reports that AI is not configured; the rest of the app still works.
 * Replies arrive when the tool loop finishes (no token streaming).
+* Default model `gemini-3.5-flash` (override with `GEMINI_MODEL`). A Google free-tier key allows only about **20 requests per day per model**, and one assistant turn uses at least two requests, so a free key supports roughly ten turns a day. Enable billing on the key (or switch `GEMINI_MODEL`) if you need more.
+
+### AI tool-calling workflow (human approval before financial operations)
+1. The user sends a message to `POST /api/ai/chat`; the backend sends it to Gemini together with the 14 tool declarations.
+2. **Read tools** (list/get transactions, revenue, pending payments, analysis, reminder suggestions) run immediately, scoped to the signed-in user, and their results go back to the model.
+3. **Write tools** (create/update invoice, create customer, generate a payment link, create a PayPal order, queue a reminder) are only **prepared**: the stored action has status `prepared` and the UI shows a preview. **No invoice is created and no PayPal request is made.**
+4. The user clicks **Approve** (`POST /api/ai/actions/{id}/confirm`) or **Cancel** (`POST /api/ai/actions/{id}/cancel`). Only an approved action executes, and only once (a cancelled action cannot be confirmed afterwards).
+5. Invalid tool arguments (for example a zero amount) are returned to the model as an error and are never executed.
+* Verified by automated tests and by a live Gemini session during development: a transaction summary using `list_transactions`, an invoice prepared and then created only after approval, a payment-link action prepared and cancelled with no PayPal request, and no API key in any log record.
 
 ## Technology stack
 React 18 · TypeScript · Vite · Tailwind CSS · TanStack Query · Python 3.12 · FastAPI · SQLAlchemy 2 · Supabase (Auth + Postgres) · PayPal Orders v2 (Sandbox) · Razorpay (optional) · Gemini / OpenAI · Vitest + React Testing Library · pytest.
@@ -85,6 +94,7 @@ PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
 PAYPAL_WEBHOOK_ID=<sandbox webhook id>
 AI_PROVIDER=gemini
 GEMINI_API_KEY=<your key>            # or OPENAI_API_KEY with AI_PROVIDER=openai
+GEMINI_MODEL=gemini-3.5-flash        # optional; set it if Google retires or overloads the default
 RAZORPAY_KEY_ID=<optional>
 RAZORPAY_KEY_SECRET=<optional>
 RAZORPAY_WEBHOOK_SECRET=<optional>
@@ -123,7 +133,7 @@ Screenshots are not committed yet. Add them to `docs/screenshots/` and link them
 
 ## Limitations and future improvements
 * **Sandbox only.** Live PayPal has not been used or verified.
-* The AI assistant needs your own Gemini/OpenAI key and has no token streaming.
+* The AI assistant needs your own Gemini/OpenAI key and has no token streaming. On a free Gemini key the daily quota (about 20 requests per model per day) is easy to exhaust; the app then shows "The AI provider rate limit or quota was reached".
 * **Reminders are drafted, not sent** — no email/SMS delivery.
 * Razorpay is test-mode only and has no refunds.
 * PayPal refund/reversal **webhook payload shapes have not been verified against live Sandbox events**.

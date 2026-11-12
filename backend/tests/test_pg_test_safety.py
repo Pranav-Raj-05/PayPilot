@@ -59,7 +59,7 @@ def no_driver(monkeypatch):
 def opted_in(monkeypatch):
     monkeypatch.setenv("ALLOW_DESTRUCTIVE_PG_TESTS", "1")
     monkeypatch.delenv("PG_TEST_ALLOWED_HOSTS", raising=False)
-    for var in pg_safety.TARGET_ENV_VARS:  # a developer machine may legitimately have PGHOST etc.; unit tests must not depend on it
+    for var in pg_safety.REFUSED_ENV_VARS:  # a developer machine may legitimately have PGHOST etc.; unit tests must not depend on it
         monkeypatch.delenv(var, raising=False)
 
 
@@ -685,7 +685,7 @@ class TestLibpqEnvironmentPolicy:
             assert "7777777" not in str(e.value) and "6543" not in str(e.value)  # names only, never values
         assert not no_driver
 
-    @pytest.mark.parametrize("var", pg_safety.TARGET_ENV_VARS)
+    @pytest.mark.parametrize("var", pg_safety.REFUSED_ENV_VARS)
     @pytest.mark.parametrize("value", ["x", "", "203.0.113.5"])
     def test_every_target_selecting_variable_is_refused_when_present(self, var, value, monkeypatch, opted_in, no_driver):
         monkeypatch.setenv(var, value)
@@ -704,14 +704,12 @@ class TestLibpqEnvironmentPolicy:
 
     def test_every_variable_libpq_reports_is_classified(self):
         """If a newer libpq adds a PG* variable this fails, forcing a conscious decision: target-selecting (refuse) or harmless (permit)."""
-        from psycopg import pq
-
-        reported = {o.envvar.decode() for o in pq.Conninfo.get_defaults() if o.envvar}
-        unclassified = reported - set(pg_safety.TARGET_ENV_VARS) - set(pg_safety.PERMITTED_ENV_VARS)
-        assert not unclassified, f"classify these libpq environment variables in pg_safety.py: {sorted(unclassified)}"
+        unclassified = pg_safety.unclassified_libpq_env_vars()  # asks the installed libpq; the Windows wheel bundles libpq 14, the Linux wheel libpq 17
+        assert not unclassified, f"classify these libpq environment variables in pg_safety.py: {unclassified}"
 
     def test_the_two_lists_are_disjoint_and_cover_the_minimum_set(self):
-        assert not set(pg_safety.TARGET_ENV_VARS) & set(pg_safety.PERMITTED_ENV_VARS)
+        assert not set(pg_safety.REFUSED_ENV_VARS) & set(pg_safety.PERMITTED_ENV_VARS)
+        assert set(pg_safety.TARGET_ENV_VARS) <= set(pg_safety.REFUSED_ENV_VARS) and set(pg_safety.CREDENTIAL_FORWARDING_ENV_VARS) <= set(pg_safety.REFUSED_ENV_VARS)
         for var in ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS"):
             assert var in pg_safety.TARGET_ENV_VARS
         for var in ("PGUSER", "PGSSLMODE", "PGSSLROOTCERT", "PGTARGETSESSIONATTRS", "PGCONNECT_TIMEOUT"):
@@ -739,10 +737,63 @@ class TestLibpqEnvironmentPolicy:
             _boot("postgresql://u@localhost/pp_test_abc")
         assert not no_driver
 
+    # The complete set of environment variables read by the libpq 17 that the Linux psycopg-binary 3.2.3 wheel bundles (what GitHub Actions runs),
+    # extracted from that manylinux wheel (libpq.so.5.17). The Windows wheel bundles libpq 14 and reports fewer, so a Windows-only run could not see the gap.
+    LIBPQ_17_ENV_VARS = frozenset("""PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE PGDATESTYLE PGGEQO PGGSSDELEGATION PGGSSENCMODE
+        PGGSSLIB PGHOST PGHOSTADDR PGKRBSRVNAME PGLOADBALANCEHOSTS PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH PGREQUIREPEER PGREQUIRESSL
+        PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCERTMODE PGSSLCOMPRESSION PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION
+        PGSSLMODE PGSSLNEGOTIATION PGSSLROOTCERT PGSSLSNI PGSYSCONFDIR PGTARGETSESSIONATTRS PGTZ PGUSER""".split())
+
+    def test_every_variable_of_the_libpq_17_that_github_actions_runs_is_classified(self):
+        """Replays the CI condition on any machine: CI failed because libpq 17 reads PGGSSDELEGATION, PGSSLCERTMODE and PGSSLNEGOTIATION."""
+        assert pg_safety.unclassified_libpq_env_vars(set(self.LIBPQ_17_ENV_VARS)) == []
+
+    def test_the_three_variables_that_broke_ci_have_the_intended_classification(self):
+        # transport-only: a TLS client certificate mode and how the TLS handshake starts. They cannot change host, port or database.
+        for var in ("PGSSLCERTMODE", "PGSSLNEGOTIATION"):
+            assert var in pg_safety.PERMITTED_ENV_VARS and var not in pg_safety.REFUSED_ENV_VARS
+        # credential forwarding: refused, because Kerberos credentials would reach whichever server answers, before the server check runs
+        assert "PGGSSDELEGATION" in pg_safety.CREDENTIAL_FORWARDING_ENV_VARS and "PGGSSDELEGATION" in pg_safety.REFUSED_ENV_VARS
+        assert "PGGSSDELEGATION" not in pg_safety.PERMITTED_ENV_VARS
+
+    def test_pggssdelegation_is_refused_when_present_and_the_permitted_two_are_accepted(self, monkeypatch, opted_in, no_driver):
+        monkeypatch.setenv("PGGSSDELEGATION", "1")
+        with pytest.raises(UnsafeDatabaseTarget, match="PGGSSDELEGATION") as e:
+            pg_safety.assert_safe_admin_url("postgresql://u@localhost:5432/postgres")
+        assert "=1" not in str(e.value)
+        monkeypatch.delenv("PGGSSDELEGATION")
+        for var, value in (("PGSSLCERTMODE", "disable"), ("PGSSLNEGOTIATION", "direct")):
+            monkeypatch.setenv(var, value)
+            pg_safety.assert_safe_admin_url("postgresql://u@localhost:5432/postgres")
+            assert pg_safety._connect_kwargs("postgresql://u@localhost:5432/postgres")["port"] == 5432  # the destination is untouched
+            monkeypatch.delenv(var)
+        assert not no_driver
+
+    def test_an_unknown_future_libpq_variable_fails_closed(self, monkeypatch, opted_in, no_driver):
+        """If a newer libpq starts reading PGFUTURETHING, the classification test fails AND a run with it set is refused at runtime."""
+        future = set(self.LIBPQ_17_ENV_VARS) | {"PGFUTURETHING"}
+        assert pg_safety.unclassified_libpq_env_vars(future) == ["PGFUTURETHING"]
+        monkeypatch.setattr(pg_safety, "libpq_reported_env_vars", lambda: future)
+        assert pg_safety.unclassified_libpq_env_vars() == ["PGFUTURETHING"]
+        pg_safety.assert_safe_admin_url("postgresql://u@localhost:5432/postgres")  # not set: nothing to refuse
+        monkeypatch.setenv("PGFUTURETHING", "x")
+        for call in (lambda: pg_safety.assert_safe_admin_url("postgresql://u@localhost:5432/postgres"), lambda: pg_safety.connect_verified("postgresql://u@localhost:5432/postgres"),
+                     lambda: pg_safety.create_database("postgresql://u@localhost:5432/postgres", "pp_test_abc")):
+            with pytest.raises(UnsafeDatabaseTarget, match="PGFUTURETHING") as e:
+                call()
+            assert "classified" in str(e.value)
+        assert not no_driver
+
+    def test_variables_libpq_does_not_read_are_not_refused(self, monkeypatch, opted_in):
+        """Fail closed applies to what libpq reads, not to every PG* name (PGDATA, PG_TEST_ALLOWED_HOSTS and friends stay usable)."""
+        monkeypatch.setenv("PGDATA", "/some/dir")
+        monkeypatch.setenv("PG_TEST_ALLOWED_HOSTS", "localhost")
+        pg_safety.assert_safe_admin_url("postgresql://u@localhost:5432/postgres")
+
     def test_the_policy_is_documented(self):
         doc = (Path(__file__).resolve().parents[2] / "docs" / "postgres-testing.md").read_text(encoding="utf-8")
-        for var in pg_safety.TARGET_ENV_VARS:
-            assert var in doc, f"{var} is refused by pg_safety but not documented"
+        for var in pg_safety.REFUSED_ENV_VARS + pg_safety.PERMITTED_ENV_VARS:
+            assert var in doc, f"{var} is classified by pg_safety but not documented"
 
 
 class TestTempDatabaseCleanup:

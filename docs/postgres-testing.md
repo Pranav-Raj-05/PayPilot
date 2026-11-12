@@ -60,12 +60,13 @@ The URL, the environment and the driver must all describe the same destination. 
 | `PGDATABASE` | chooses the database |
 | `PGSERVICE`, `PGSERVICEFILE` | load host, port and database from a service file |
 | `PGOPTIONS` | injects session settings (`-c ...`); the URL `options` parameter is refused for the same reason |
+| `PGGSSDELEGATION` | libpq 16+: forwards your Kerberos credentials to the server. It cannot redirect the connection, but the credentials would reach whichever server answers (for example through a tunnel) before the server check can notice; nothing here needs it |
 
 Host, port and database are passed explicitly, so these could not win anyway; they are refused as well so that the environment never contradicts the URL and so that a future code path that forgets an argument cannot be redirected.
 
-**Environment variables that are permitted**, because they can make a connection *fail* or change how it authenticates, encrypts or times out, but cannot make it go somewhere else (exactly one host, port and database are fixed in the call): `PGUSER`, `PGPASSWORD`, `PGPASSFILE`, `PGSSLMODE`, `PGSSLCERT`, `PGSSLKEY`, `PGSSLROOTCERT`, `PGSSLCRL`, `PGSSLCRLDIR`, `PGSSLSNI`, `PGSSLCOMPRESSION`, `PGSSLMINPROTOCOLVERSION`, `PGSSLMAXPROTOCOLVERSION`, `PGGSSENCMODE`, `PGGSSLIB`, `PGKRBSRVNAME`, `PGREQUIREAUTH`, `PGREQUIREPEER`, `PGCHANNELBINDING`, `PGCONNECT_TIMEOUT`, `PGCLIENTENCODING`, `PGAPPNAME`, `PGTZ`, `PGDATESTYLE`, `PGGEQO`, `PGSYSCONFDIR` (only locates the service file, which is refused anyway), `PGTARGETSESSIONATTRS` and `PGLOADBALANCEHOSTS` (only meaningful with several hosts, which are refused).
+**Environment variables that are permitted**, because they can make a connection *fail* or change how it authenticates, encrypts or times out, but cannot make it go somewhere else (exactly one host, port and database are fixed in the call): `PGUSER`, `PGPASSWORD`, `PGPASSFILE`, `PGSSLMODE`, `PGSSLCERT`, `PGSSLKEY`, `PGSSLROOTCERT`, `PGSSLCRL`, `PGSSLCRLDIR`, `PGSSLSNI`, `PGSSLCOMPRESSION`, `PGSSLMINPROTOCOLVERSION`, `PGSSLMAXPROTOCOLVERSION`, `PGSSLCERTMODE` (libpq 16+, whether a client certificate is sent), `PGSSLNEGOTIATION` (libpq 17, how the TLS handshake starts: `postgres` or `direct`), `PGREQUIRESSL` (deprecated), `PGGSSENCMODE`, `PGGSSLIB`, `PGKRBSRVNAME`, `PGREQUIREAUTH`, `PGREQUIREPEER`, `PGCHANNELBINDING`, `PGCONNECT_TIMEOUT`, `PGCLIENTENCODING`, `PGAPPNAME`, `PGTZ`, `PGDATESTYLE`, `PGGEQO`, `PGSYSCONFDIR` (only locates the service file, which is refused anyway), `PGTARGETSESSIONATTRS` and `PGLOADBALANCEHOSTS` (only meaningful with several hosts, which are refused).
 
-A test asserts that **every** variable the installed libpq reports is in one of the two lists, so a newer libpq that adds a variable forces a decision instead of slipping through.
+**The set depends on the libpq version.** psycopg bundles its own libpq: the Windows wheel of `psycopg-binary 3.2.3` bundles libpq 14 (28 variables), the Linux wheel that GitHub Actions installs bundles libpq 17 and reads three more (`PGGSSDELEGATION`, `PGSSLCERTMODE`, `PGSSLNEGOTIATION`). A Windows-only run therefore cannot see every variable. The guard **fails closed** in two places: a test asserts that every variable the installed libpq reports (and, separately, the complete libpq 17 set that CI runs) is classified, and at run time any variable the installed libpq reads that is in none of the lists is refused when present. A newer libpq that adds a variable therefore forces a decision instead of slipping through. Names that libpq does not read (`PGDATA`, `PG_TEST_ALLOWED_HOSTS`) are not affected.
 
 ### 2.2 What the guard cannot prove
 
@@ -222,29 +223,29 @@ Do this on a Supabase **development branch** (or a throw-away project), never di
 
 ## 10. Recorded results (for comparison)
 
-Measured at the end of Stage B3.2 on a local PostgreSQL **16.2** (Windows; a throw-away server). CI runs the same commands on PostgreSQL **17**, which has NOT been run locally (not available on the development machine). Counts will grow as tests are added; treat them as a sanity reference, not a contract.
+Measured after the libpq 17 environment-variable classification fix, on a local PostgreSQL **16.2** (Windows; a throw-away server). CI runs the same commands on PostgreSQL **17**, which has NOT been run locally (not available on the development machine). Counts will grow as tests are added; treat them as a sanity reference, not a contract.
 
 With the PostgreSQL variables **set** (`TEST_POSTGRES_URL`, `ALLOW_DESTRUCTIVE_PG_TESTS=1`):
 
 | Command | Result |
 |---|---|
 | `tests/test_migrations_postgres.py` | 60 passed (3 consecutive runs) |
-| `tests/test_pg_test_safety.py` | 277 passed |
+| `tests/test_pg_test_safety.py` | 288 passed |
 | `tests/test_profile_concurrency.py` | 12 passed (5 consecutive runs) |
 | Race test `test_d2_cancel_and_capture_race_on_postgresql` | 1 passed (5 consecutive runs) |
 | `tests/test_money_integrity.py` (includes the race test) | 87 passed |
-| Complete backend suite, PostgreSQL enabled | 502 passed, 0 failed, 0 skipped (2 consecutive runs) |
-| `pytest tests -p tests.support.pg_migrated` (migrated schema) | 343 passed, 159 deselected (the modules that bring their own databases), 1 warning (see below); 2 consecutive runs |
+| Complete backend suite, PostgreSQL enabled | 523 passed, 0 failed, 0 skipped |
+| `pytest tests -p tests.support.pg_migrated` (migrated schema) | 364 passed, 159 deselected (the modules that bring their own databases), 1 warning (see below); 2 consecutive runs |
 
 With the PostgreSQL variables **unset** (the default developer run and the plain CI `backend` job): PostgreSQL tests skip with an explanatory reason and nothing connects.
 
 | Command | Result |
 |---|---|
 | `tests/test_migrations_postgres.py` | 8 passed (static), 52 skipped |
-| `tests/test_pg_test_safety.py` | 273 passed, 4 skipped |
+| `tests/test_pg_test_safety.py` | 284 passed, 4 skipped |
 | `tests/test_profile_concurrency.py` | 7 passed (file-SQLite variants), 5 skipped |
-| Complete backend suite | 440 passed, 62 skipped |
-| `pytest tests -p tests.support.pg_migrated` | 343 skipped, 159 deselected |
+| Complete backend suite | 461 passed, 62 skipped |
+| `pytest tests -p tests.support.pg_migrated` | 364 skipped, 159 deselected |
 
 Frontend: `cd frontend && npm test` = 19 test files, 438 tests passed; `npm run build` succeeds.
 

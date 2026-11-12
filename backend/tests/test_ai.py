@@ -53,6 +53,53 @@ def test_clean_schema_inlines_refs():
     assert out == {"properties": {"x": {"type": "object", "properties": {"a": {"type": "string"}}}}, "type": "object"}
 
 
+def test_clean_schema_strips_exclusive_bounds_that_gemini_rejects():
+    out = clean_schema({"type": "object", "properties": {"amount": {"type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 9, "minimum": 1}}})
+    assert out == {"type": "object", "properties": {"amount": {"type": "number", "minimum": 1}}}
+    for t in tool_declarations():  # every declaration sent to the provider
+        assert "exclusiveMinimum" not in str(t["parameters"]) and "exclusiveMaximum" not in str(t["parameters"])
+
+
+def test_tool_inputs_still_enforce_the_bounds_that_were_stripped_from_the_schema(user, llm):
+    """The model is no longer told amount > 0 in the schema, so the server-side validation must still refuse it."""
+    llm(LLMResult(tool_calls=[ToolCall("1", "create_invoice", {**INVOICE_ARGS, "amount": 0})]), LLMResult(text="done"))
+    r = user.post("/api/ai/chat", json={"message": "invoice for 0 dollars"})
+    assert r.status_code == 200
+    assert user.get("/api/invoices").json()["total"] == 0  # nothing created
+    assert not [a for a in user.get("/api/ai/actions").json() if (a.get("tool_result") or {}).get("status") == "prepared"]  # and nothing even prepared
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (400, {"error": {"details": [{"reason": "API_KEY_INVALID"}]}}, "GEMINI_API_KEY"),
+    (403, {"error": {"message": "denied"}}, "GEMINI_API_KEY"),
+    (404, {"error": {"message": "model gone"}}, "GEMINI_MODEL"),
+    (429, {"error": {}}, "quota"),
+    (503, {"error": {}}, "overloaded"),
+    (400, {"error": {"message": "Invalid JSON payload"}}, "The AI provider returned an error"),
+    (500, {"error": {}}, "The AI provider returned an error"),
+])
+def test_gemini_errors_give_a_specific_message_and_never_echo_the_key(status, body, expected):
+    import httpx
+
+    from app.ai.providers import GeminiProvider
+    from app.core.config import Settings
+    from app.core.errors import ProviderError
+
+    secret = "AIza-secret-value-that-must-never-appear-0000"
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(status, json=body)))
+    provider = GeminiProvider(Settings(gemini_api_key=secret, gemini_model="m"), http=http)
+    with pytest.raises(ProviderError) as e:
+        provider.generate("sys", [{"role": "user", "content": "hi"}], [])
+    assert expected in e.value.message and secret not in e.value.message and secret not in str(e.value.details)
+    assert e.value.details == {"status": status}
+
+
+def test_the_default_gemini_model_is_not_the_retired_one():
+    from app.core.config import Settings
+
+    assert Settings().gemini_model != "gemini-2.5-flash"
+
+
 def test_chat_requires_auth_and_configured_llm(client, user):
     assert client.post("/api/ai/chat", json={"message": "hi"}).status_code == 401
     r = user.post("/api/ai/chat", json={"message": "hi"})  # no GEMINI_API_KEY in tests

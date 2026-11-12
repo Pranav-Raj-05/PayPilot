@@ -42,7 +42,9 @@ def clean_schema(schema: dict) -> dict:
             return node
         if "$ref" in node:
             return walk(copy.deepcopy(defs[node["$ref"].split("/")[-1]]))
-        node = {k: v for k, v in node.items() if k not in ("title", "$defs", "default", "additionalProperties", "examples")}
+        # exclusiveMinimum/Maximum (emitted for Pydantic gt/lt) make Gemini reject the whole request with HTTP 400; the Pydantic input
+        # models still enforce those bounds when the tool runs.
+        node = {k: v for k, v in node.items() if k not in ("title", "$defs", "default", "additionalProperties", "examples", "exclusiveMinimum", "exclusiveMaximum")}
         if "anyOf" in node:
             options = [o for o in node["anyOf"] if o.get("type") != "null"]
             rest = {k: v for k, v in node.items() if k != "anyOf"}
@@ -51,6 +53,24 @@ def clean_schema(schema: dict) -> dict:
         return {k: walk(v) for k, v in node.items()}
 
     return walk(schema)
+
+
+def gemini_error_message(r: httpx.Response) -> str:
+    """A specific, key-free message for the failures an operator can fix; anything else keeps the generic text."""
+    reason = ""
+    try:
+        reason = next((d.get("reason", "") for d in r.json().get("error", {}).get("details", []) if isinstance(d, dict) and d.get("reason")), "")
+    except Exception:
+        pass
+    if r.status_code in (401, 403) or reason == "API_KEY_INVALID":
+        return "The AI provider rejected the API key. Check GEMINI_API_KEY."
+    if r.status_code == 404:
+        return "The configured AI model is not available. Check GEMINI_MODEL."
+    if r.status_code == 429:
+        return "The AI provider rate limit or quota was reached. Try again shortly."
+    if r.status_code == 503:
+        return "The AI provider is overloaded right now. Try again in a moment."
+    return "The AI provider returned an error"
 
 
 class GeminiProvider:
@@ -85,7 +105,7 @@ class GeminiProvider:
             raise ProviderError("Could not reach the AI provider") from exc
         if r.status_code != 200:
             log.error("gemini error %s %s", r.status_code, r.text[:300])
-            raise ProviderError("The AI provider returned an error", details={"status": r.status_code})
+            raise ProviderError(gemini_error_message(r), details={"status": r.status_code})
         cands = r.json().get("candidates") or []
         if not cands or "content" not in cands[0]:
             return LLMResult(text="I couldn't produce a response for that. Could you rephrase?")
