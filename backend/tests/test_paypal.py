@@ -162,6 +162,8 @@ def test_webhook_reverifies_with_paypal_and_ignores_unknown_orders(client, user,
 def test_webhook_refund(client, user, invoice, providers):
     o = create(user, invoice)
     user.post("/api/payments/paypal/capture-order", json={"order_id": o["order_id"]})
+    # The webhook body is only a pointer; the amount is read back from PayPal, so the refund must exist there.
+    providers.refunds["REF1"] = {"id": "REF1", "status": "COMPLETED", "amount": {"value": "500.00", "currency_code": "USD"}}
     ev = {"id": "WH-EVT-9", "event_type": "PAYMENT.CAPTURE.REFUNDED",
           "resource": {"id": "REF1", "links": [{"rel": "up", "href": f"https://api/v2/payments/captures/CAP-{o['order_id']}"}]}}
     assert hook(client, ev).status_code == 200

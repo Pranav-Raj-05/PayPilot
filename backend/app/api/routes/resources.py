@@ -1,14 +1,16 @@
 """customers, invoices, transactions, payment links."""
+from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_payment_service
 from app.core.db import get_db
 from app.core.errors import AppError
-from app.core.ratelimit import rate_limit
+from app.core.ratelimit import ip_rate_limit, user_rate_limit
 from app.core.security import CurrentUser, get_current_user
 from app.models import AuditLog, PaymentLink, Transaction
 from sqlalchemy import select as sa_select
@@ -108,7 +110,7 @@ def delete_invoice(invoice_id: str, user: CurrentUser = Depends(get_current_user
     InvoiceService(db, user.id).delete(invoice_id)
 
 
-@invoices_router.post("/{invoice_id}/payment-link", response_model=PaymentLinkOut, status_code=201, dependencies=[Depends(rate_limit("pay-create", 20))])
+@invoices_router.post("/{invoice_id}/payment-link", response_model=PaymentLinkOut, status_code=201, dependencies=[Depends(user_rate_limit("pay-create", 20))])
 def create_invoice_payment_link(invoice_id: str, provider: Literal["paypal", "razorpay"] = "paypal", user: CurrentUser = Depends(get_current_user),
                                 payments: PaymentService = Depends(get_payment_service)):
     make = payments.create_paypal_order if provider == "paypal" else payments.create_razorpay_order
@@ -122,9 +124,18 @@ def transactions_summary(currency: str | None = None, user: CurrentUser = Depend
     return transaction_summary(db, user.id, currency)
 
 
-@transactions_router.post("/{transaction_id}/refund", response_model=TransactionOut, dependencies=[Depends(rate_limit("refund", 10))])
-def refund_transaction(transaction_id: str, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
-    return payments.refund_paypal(transaction_id, user.id)
+class RefundIn(BaseModel):
+    """Optional body. No amount = refund everything still refundable. `idempotency_key` makes a retried request return the first result."""
+    amount: Decimal | None = Field(None, gt=0, le=Decimal("100000000"))
+    reason: str | None = Field(None, max_length=255)
+    idempotency_key: str | None = Field(None, min_length=8, max_length=100)
+
+
+@transactions_router.post("/{transaction_id}/refund", response_model=TransactionOut, dependencies=[Depends(user_rate_limit("refund", 10))])
+def refund_transaction(transaction_id: str, body: RefundIn | None = None, idempotency_key: Annotated[str | None, Header()] = None,
+                       user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
+    body = body or RefundIn()
+    return payments.refund(transaction_id, user.id, amount=body.amount, idempotency_key=idempotency_key or body.idempotency_key, reason=body.reason)
 
 
 @transactions_router.get("", response_model=Page[TransactionOut])
@@ -152,7 +163,7 @@ def list_links(user: CurrentUser = Depends(get_current_user), db: Session = Depe
     return db.scalars(repo.query().order_by(PaymentLink.created_at.desc()).limit(200)).unique().all()
 
 
-@links_router.post("", response_model=PaymentLinkOut, status_code=201, dependencies=[Depends(rate_limit("pay-create", 20))])
+@links_router.post("", response_model=PaymentLinkOut, status_code=201, dependencies=[Depends(user_rate_limit("pay-create", 20))])
 def create_link(body: PaymentLinkIn, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
     make = payments.create_paypal_order if body.provider == "paypal" else payments.create_razorpay_order
     _, link = make(user.id, amount=body.amount, currency=body.currency, description=body.description, customer_id=body.customer_id, expires_at=body.expires_at)
@@ -160,10 +171,5 @@ def create_link(body: PaymentLinkIn, user: CurrentUser = Depends(get_current_use
 
 
 @links_router.post("/{link_id}/cancel", response_model=PaymentLinkOut)
-def cancel_link(link_id: str, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    link = PaymentLinkRepo(db, user.id).get(link_id)
-    if link.status != "active":
-        raise AppError(f"Link is already {link.status}", code="invalid_state", status_code=409)
-    link.status = "cancelled"
-    audit(db, user.id, "payment_link.cancel", "payment_link", link.id)
-    return link
+def cancel_link(link_id: str, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
+    return payments.cancel_payment_link(link_id, user.id)  # cancels the link AND the order behind it

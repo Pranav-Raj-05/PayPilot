@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -54,3 +54,27 @@ def get_db() -> Iterator[Session]:
         raise
     finally:
         db.close()
+
+
+def upgrade_sqlite_dev_schema(engine) -> list[str]:
+    """`create_all` creates missing TABLES but never adds columns to existing ones, so a local SQLite file created before a model gained a
+    column would break. For SQLite only (local development / tests) add any missing column, using the model's server default for NOT
+    NULL columns. Production schema changes are the SQL files in supabase/migrations. Returns what it added."""
+    from app.models import Base
+
+    added: list[str] = []
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
+                if col.server_default is not None:
+                    ddl += f" DEFAULT {col.server_default.arg}"
+                conn.execute(text(ddl))
+                added.append(f"{table.name}.{col.name}")
+    return added

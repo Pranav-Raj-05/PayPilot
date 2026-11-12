@@ -17,7 +17,7 @@ from app.payments.base import CaptureResult
 from app.payments.razorpay.client import verify_webhook_signature
 from app.services.payments import PaymentService
 from app.services.transactions import add_event
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 log = logging.getLogger("paypilot.webhooks")
@@ -34,6 +34,14 @@ def _dedupe(db: Session, provider: str, event_id: str, event_type: str, payload:
         return False
 
 
+def _release_event(db: Session, provider: str, event_id: str) -> None:
+    """Processing failed: forget the delivery so the provider's retry of the SAME event id is processed, not skipped as a duplicate.
+    Explicit on purpose: relying on the transaction rollback alone is not enough on every database (SQLite commits a savepoint on release)."""
+    db.rollback()
+    db.execute(delete(WebhookEvent).where(WebhookEvent.provider == provider, WebhookEvent.event_id == event_id))
+    db.commit()
+
+
 @router.post("/paypal")
 async def paypal_webhook(request: Request, db: Session = Depends(get_db), paypal: PayPalClient = Depends(get_paypal),
                          payments: PaymentService = Depends(get_payment_service)):
@@ -48,31 +56,39 @@ async def paypal_webhook(request: Request, db: Session = Depends(get_db), paypal
     etype, eid = event.get("event_type", ""), event.get("id", "")
     if not _dedupe(db, "paypal", eid, etype, event):
         return {"received": True, "duplicate": True}
-    res = event.get("resource", {}) or {}
-    order_id = ((res.get("supplemental_data") or {}).get("related_ids") or {}).get("order_id") or (res.get("id") if etype.startswith("CHECKOUT.ORDER") else None)
+    try:
+        res = event.get("resource", {}) or {}
+        order_id = ((res.get("supplemental_data") or {}).get("related_ids") or {}).get("order_id") or (res.get("id") if etype.startswith("CHECKOUT.ORDER") else None)
 
-    def find_txn() -> Transaction | None:
-        if order_id:
-            return db.scalars(select(Transaction).where(Transaction.provider == "paypal", Transaction.provider_order_id == order_id).with_for_update()).unique().first()
-        up = next((l["href"] for l in res.get("links", []) if l.get("rel") == "up"), "")
-        cap_id = res.get("id") if etype.startswith("PAYMENT.CAPTURE.COMPLETED") else up.rstrip("/").split("/")[-1]
-        return db.scalars(select(Transaction).where(Transaction.provider == "paypal", Transaction.provider_capture_id == cap_id).with_for_update()).unique().first()
+        def find_txn() -> Transaction | None:
+            if order_id:
+                return db.scalars(select(Transaction).where(Transaction.provider == "paypal", Transaction.provider_order_id == order_id).with_for_update(of=Transaction)).unique().first()
+            up = next((l["href"] for l in res.get("links", []) if l.get("rel") == "up"), "")
+            cap_id = res.get("id") if etype in ("PAYMENT.CAPTURE.COMPLETED", "PAYMENT.CAPTURE.REVERSED") else up.rstrip("/").split("/")[-1]
+            return db.scalars(select(Transaction).where(Transaction.provider == "paypal", Transaction.provider_capture_id == cap_id).with_for_update(of=Transaction)).unique().first()
 
-    txn = find_txn()
-    if txn is None:
-        return {"received": True, "matched": False}  # not ours (or created elsewhere) - acknowledge so PayPal stops retrying
-    if etype == "CHECKOUT.ORDER.APPROVED":
-        add_event(txn, "approved", "Customer approved the order at PayPal")
-        if txn.status == "created":
-            txn.status = "pending"
-    elif etype == "PAYMENT.CAPTURE.COMPLETED":
-        order = paypal.get_order(txn.provider_order_id)  # never trust the webhook body alone: re-verify with PayPal
-        payments.apply_capture(txn, parse_capture(order))
-    elif etype in ("PAYMENT.CAPTURE.DENIED", "PAYMENT.CAPTURE.DECLINED"):
-        payments.apply_capture(txn, CaptureResult(status="failed", order_id=txn.provider_order_id or "", reason="Capture denied by PayPal"))
-    elif etype in ("PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED"):
-        payments.apply_refund(txn)
-    return {"received": True, "matched": True, "type": etype}
+        txn = find_txn()
+        if txn is None:
+            return {"received": True, "matched": False}  # not ours (or created elsewhere) - acknowledge so PayPal stops retrying
+        if etype == "CHECKOUT.ORDER.APPROVED":
+            add_event(txn, "approved", "Customer approved the order at PayPal")
+            if txn.status == "created":
+                txn.status = "pending"
+        elif etype == "PAYMENT.CAPTURE.COMPLETED":
+            order = paypal.get_order(txn.provider_order_id)  # never trust the webhook body alone: re-verify with PayPal
+            payments.apply_capture(txn, parse_capture(order))
+        elif etype in ("PAYMENT.CAPTURE.DENIED", "PAYMENT.CAPTURE.DECLINED"):
+            payments.apply_capture(txn, CaptureResult(status="failed", order_id=txn.provider_order_id or "", reason="Capture denied by PayPal"))
+        elif etype == "PAYMENT.CAPTURE.REFUNDED":
+            # The body is only a pointer: the refund (amount, currency, status) is read back from PayPal, may be partial, and is recorded
+            # idempotently per refund id, so retries and out-of-order deliveries cannot double count it.
+            payments.apply_provider_refund(txn, paypal.get_refund(res.get("id", "")), source="webhook")
+        elif etype == "PAYMENT.CAPTURE.REVERSED":
+            payments.apply_reversal(txn)
+        return {"received": True, "matched": True, "type": etype}
+    except Exception:
+        _release_event(db, "paypal", eid)
+        raise
 
 
 @router.post("/razorpay")
@@ -85,5 +101,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db), sett
     eid = request.headers.get("x-razorpay-event-id") or f"{event.get('event')}:{(event.get('payload', {}).get('payment', {}).get('entity', {}) or {}).get('id')}"
     if not _dedupe(db, "razorpay", eid, event.get("event", ""), event):
         return {"received": True, "duplicate": True}
-    txn = payments.razorpay_webhook_event(event)
+    try:
+        txn = payments.razorpay_webhook_event(event)
+    except Exception:
+        _release_event(db, "razorpay", eid)
+        raise
     return {"received": True, "matched": txn is not None}

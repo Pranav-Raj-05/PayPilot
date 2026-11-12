@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 from app.ai.providers import LLMResult, ToolCall, clean_schema
@@ -188,3 +190,63 @@ def test_recent_actions_endpoint(user, other, llm):
     acts = user.get("/api/ai/actions").json()
     assert len(acts) == 1 and acts[0]["tool_name"] == "create_invoice" and acts[0]["tool_result"]["status"] == "prepared"
     assert other.get("/api/ai/actions").json() == []
+
+
+# --- message ordering: created_at alone is not a total order -------------------------------------------------------
+# Messages of one turn are inserted back to back; on a coarse clock (Windows ~0.4-15 ms) or a very fast machine they
+# share a timestamp, and `ORDER BY created_at` then returns them in an undefined order.
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Control the clock used for message timestamps (both the agent and the column default)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import AIMessage
+
+    state = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc), "step": timedelta(0)}
+
+    def now(_ctx=None):
+        state["now"] += state["step"]
+        return state["now"]
+
+    monkeypatch.setattr("app.ai.agent.utcnow", now)
+    monkeypatch.setattr(AIMessage.__table__.c.created_at.default, "arg", now)
+    return state
+
+
+def _chat_turns(user, llm, clock, rounds=6):
+    """Alternate plain replies and tool-using turns so a conversation has many messages."""
+    expected, cid = [], None
+    for i in range(rounds):
+        if i % 2:
+            llm(*prepare_turns())
+            expected += ["user", "tool", "assistant"]
+        else:
+            llm(LLMResult(text=f"reply {i}"))
+            expected += ["user", "assistant"]
+        body = {"message": f"message {i}"} | ({"conversation_id": cid} if cid else {})
+        cid = user.post("/api/ai/chat", json=body).json()["conversation_id"]
+    return cid, expected
+
+
+@pytest.mark.parametrize("step_us", [0, -1000])  # clock frozen, and clock jumping backwards
+def test_messages_keep_insertion_order_on_a_stalled_or_backwards_clock(user, llm, clock, step_us):
+    from datetime import timedelta
+
+    clock["step"] = timedelta(microseconds=step_us)
+    for _ in range(3):  # several conversations (stays under the 20/min chat rate limit)
+        cid, expected = _chat_turns(user, llm, clock, rounds=5)
+        msgs = user.get(f"/api/ai/conversations/{cid}").json()
+        assert [m["role"] for m in msgs] == expected
+        # compare real datetimes, not strings: a timestamp with zero microseconds prints without a fractional part and mis-sorts as text
+        stamps = [datetime.fromisoformat(m["created_at"].replace("Z", "+00:00")) for m in msgs]
+        assert stamps == sorted(set(stamps)), "created_at must be strictly increasing within a conversation"
+
+
+def test_llm_history_is_in_conversation_order_on_a_stalled_clock(user, llm, clock):
+    llm(LLMResult(text="one"), LLMResult(text="two"))
+    cid = user.post("/api/ai/chat", json={"message": "a"}).json()["conversation_id"]
+    user.post("/api/ai/chat", json={"message": "b", "conversation_id": cid})
+    fake = llm(LLMResult(text="three"))
+    user.post("/api/ai/chat", json={"message": "c", "conversation_id": cid})
+    assert [m["content"] for m in fake.seen[0][1]] == ["a", "one", "b", "two", "c"]

@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +37,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
     openai_base_url: str = "https://api.openai.com/v1"
+
+    # Number of trusted reverse proxies in front of the API (0 = none: forwarded headers are ignored). See docs/deployment.md.
+    trusted_proxy_count: int = Field(0, ge=0, le=5)
 
     scheduler_enabled: bool = True
     scheduler_interval_seconds: int = 900

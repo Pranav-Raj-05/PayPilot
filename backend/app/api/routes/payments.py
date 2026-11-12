@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_paypal, get_payment_service
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
-from app.core.ratelimit import rate_limit
+from app.core.ratelimit import ip_rate_limit, user_rate_limit
 from app.core.security import CurrentUser, get_current_user
 from app.models import PaymentLink
 from app.payments.paypal.client import PayPalClient
@@ -53,14 +53,14 @@ def _order_response(txn, link: PaymentLink) -> dict:
 
 
 # ------------------------------------------------------------------ PayPal (authenticated)
-@paypal_router.post("/create-order", status_code=201, dependencies=[Depends(rate_limit("pay-create", 20))])
+@paypal_router.post("/create-order", status_code=201, dependencies=[Depends(user_rate_limit("pay-create", 20))])
 def paypal_create_order(body: CreateOrderIn, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
     txn, link = payments.create_paypal_order(user.id, invoice_id=body.invoice_id, amount=body.amount, currency=body.currency,
                                              description=body.description, customer_id=body.customer_id)
     return _order_response(txn, link)
 
 
-@paypal_router.post("/capture-order", dependencies=[Depends(rate_limit("pay-capture", 20))])
+@paypal_router.post("/capture-order", dependencies=[Depends(user_rate_limit("pay-capture", 20))])
 def paypal_capture(body: OrderRefIn, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
     txn = payments.capture_paypal_order(body.order_id, user_id=user.id)  # 404 if the order is not the caller's
     return {"status": txn.status, "transaction": TransactionOut.model_validate(txn).model_dump(mode="json")}
@@ -79,7 +79,7 @@ def paypal_connection(user: CurrentUser = Depends(get_current_user), db: Session
 
 
 # ------------------------------------------------------------------ Razorpay (authenticated)
-@razorpay_router.post("/create-order", status_code=201, dependencies=[Depends(rate_limit("pay-create", 20))])
+@razorpay_router.post("/create-order", status_code=201, dependencies=[Depends(user_rate_limit("pay-create", 20))])
 def razorpay_create_order(body: CreateOrderIn, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service),
                           settings: Settings = Depends(get_settings)):
     txn, link = payments.create_razorpay_order(user.id, invoice_id=body.invoice_id, amount=body.amount, currency=body.currency,
@@ -87,7 +87,7 @@ def razorpay_create_order(body: CreateOrderIn, user: CurrentUser = Depends(get_c
     return {**_order_response(txn, link), "key_id": settings.razorpay_key_id, "amount_paise": int(txn.amount * 100)}
 
 
-@razorpay_router.post("/verify-payment", dependencies=[Depends(rate_limit("pay-capture", 20))])
+@razorpay_router.post("/verify-payment", dependencies=[Depends(user_rate_limit("pay-capture", 20))])
 def razorpay_verify(body: RazorpayVerifyIn, user: CurrentUser = Depends(get_current_user), payments: PaymentService = Depends(get_payment_service)):
     txn = payments.verify_razorpay_payment(body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature, user_id=user.id)
     return {"status": txn.status, "transaction": TransactionOut.model_validate(txn).model_dump(mode="json")}
@@ -100,7 +100,7 @@ def _public(txn) -> dict:
     return {"status": txn.status, "amount": float(txn.amount), "currency": txn.currency, "invoice_number": txn.invoice.invoice_number if txn.invoice else None}
 
 
-@public_router.get("/link/{link_id}", dependencies=[Depends(rate_limit("public", 60))])
+@public_router.get("/link/{link_id}", dependencies=[Depends(ip_rate_limit("public", 60))])
 def public_link(link_id: str, db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
     from app.core.errors import NotFound
     from app.models import Profile
@@ -116,16 +116,16 @@ def public_link(link_id: str, db: Session = Depends(get_db), settings: Settings 
             "key_id": settings.razorpay_key_id if link.provider == "razorpay" else None, "url": link.url if link.provider == "paypal" else None}
 
 
-@public_router.post("/paypal/capture", dependencies=[Depends(rate_limit("public", 20))])
+@public_router.post("/paypal/capture", dependencies=[Depends(ip_rate_limit("public", 20))])
 def public_paypal_capture(body: OrderRefIn, payments: PaymentService = Depends(get_payment_service)):
     return _public(payments.capture_paypal_order(body.order_id))
 
 
-@public_router.post("/paypal/cancel", dependencies=[Depends(rate_limit("public", 20))])
+@public_router.post("/paypal/cancel", dependencies=[Depends(ip_rate_limit("public", 20))])
 def public_paypal_cancel(body: OrderRefIn, payments: PaymentService = Depends(get_payment_service)):
     return _public(payments.mark_cancelled("paypal", body.order_id))
 
 
-@public_router.post("/razorpay/verify", dependencies=[Depends(rate_limit("public", 20))])
+@public_router.post("/razorpay/verify", dependencies=[Depends(ip_rate_limit("public", 20))])
 def public_razorpay_verify(body: RazorpayVerifyIn, payments: PaymentService = Depends(get_payment_service)):
     return _public(payments.verify_razorpay_payment(body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature))

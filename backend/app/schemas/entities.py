@@ -135,12 +135,24 @@ class InvoiceOut(ORM):
     status: str
     payment_provider: str | None
     payment_link: str | None
+    version: int = 1
     items: list[InvoiceItemOut]
     created_at: datetime
     updated_at: datetime
 
 
 # ---------- transactions ----------
+class RefundOut(ORM):
+    id: uuid.UUID
+    provider_refund_id: str
+    amount: Money
+    currency: str
+    status: str  # pending | completed | failed
+    source: str
+    reason: str | None = None
+    created_at: datetime
+
+
 class TransactionOut(ORM):
     id: uuid.UUID
     customer_id: uuid.UUID | None
@@ -158,6 +170,8 @@ class TransactionOut(ORM):
     net_amount: Money | None = None
     failure_reason: str | None
     events: list
+    refunded_amount: Money = Decimal(0)  # sum of COMPLETED refunds; `amount` stays the original payment
+    refunds: list[RefundOut] = []
     created_at: datetime
     updated_at: datetime
 

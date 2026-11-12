@@ -9,6 +9,8 @@ services:
     envVars:
       - { key: APP_ENV, value: production }
       - { key: PAYPAL_BASE_URL, value: https://api-m.sandbox.paypal.com }
+      # Render puts exactly one proxy in front of the service. Verify this for your plan (docs/deployment.md) before relying on it.
+      - { key: TRUSTED_PROXY_COUNT, value: "1" }
       - { key: AI_PROVIDER, value: gemini }
       - { key: FRONTEND_URL, sync: false }
       - { key: BACKEND_URL, sync: false }

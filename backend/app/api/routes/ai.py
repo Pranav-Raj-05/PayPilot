@@ -11,7 +11,7 @@ from app.ai.tools import ToolContext
 from app.api.deps import get_llm, get_tool_context
 from app.core.db import get_db
 from app.core.errors import NotFound
-from app.core.ratelimit import rate_limit
+from app.core.ratelimit import ip_rate_limit, user_rate_limit
 from app.core.security import CurrentUser, get_current_user
 from app.models import AIConversation, AIMessage
 from app.schemas.common import ORM
@@ -42,7 +42,7 @@ class ConversationOut(ORM):
     updated_at: datetime
 
 
-@router.post("/chat", dependencies=[Depends(rate_limit("ai-chat", 20))])
+@router.post("/chat", dependencies=[Depends(user_rate_limit("ai-chat", 20))])
 def chat(body: ChatIn, ctx: ToolContext = Depends(get_tool_context), llm: LLMProvider = Depends(get_llm)):
     agent = Agent(ctx.db, ctx, llm)
     conv = agent.conversation(body.conversation_id, body.message)
@@ -88,7 +88,7 @@ def _agent(ctx: ToolContext) -> Agent:
     return Agent(ctx.db, ctx, llm=None)  # type: ignore[arg-type]
 
 
-@router.post("/actions/{message_id}/confirm", dependencies=[Depends(rate_limit("ai-confirm", 20))])
+@router.post("/actions/{message_id}/confirm", dependencies=[Depends(user_rate_limit("ai-confirm", 20))])
 def confirm_action(message_id: uuid.UUID, ctx: ToolContext = Depends(get_tool_context)):
     return MessageOut.model_validate(_agent(ctx).confirm(message_id)).model_dump(mode="json")
 

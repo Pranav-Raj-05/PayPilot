@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import ai, core, payments, resources, webhooks
 from app.core.config import get_settings
-from app.core.db import get_engine, session_factory
+from app.core.db import get_engine, session_factory, upgrade_sqlite_dev_schema
 from app.core.errors import register_exception_handlers
 from app.core.logging import setup_logging
 from app.models import Base
@@ -46,6 +46,8 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.database_url.startswith("sqlite"):
         Base.metadata.create_all(get_engine())  # dev convenience; production uses supabase/migrations
+        for col in upgrade_sqlite_dev_schema(get_engine()):
+            log.info("dev sqlite: added missing column %s", col)
     task = asyncio.create_task(_scheduler(settings.scheduler_interval_seconds)) if settings.scheduler_enabled else None
     yield
     if task:

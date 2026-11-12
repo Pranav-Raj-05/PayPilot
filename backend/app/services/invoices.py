@@ -9,6 +9,7 @@ from app.models import Customer, Invoice, InvoiceItem
 from app.repositories import CustomerRepo, InvoiceRepo
 from app.schemas.entities import InvoiceIn, InvoiceItemIn, InvoiceUpdate
 from app.services.common import audit
+from app.services.orders import live_orders, void_order
 
 CENT = Decimal("0.01")
 
@@ -82,14 +83,31 @@ class InvoiceService:
         audit(self.db, self.user_id, "invoice.create", "invoice", inv.id, {"total": str(total), "currency": inv.currency})
         return inv
 
+    # Fields a payment depends on. Changing any of them bumps Invoice.version, which invalidates every order made for the old version.
+    PAYMENT_FIELDS = ("customer_id", "items", "tax_rate", "currency")
+
     def update(self, id_, data: InvoiceUpdate) -> Invoice:
         inv = self.repo.get(id_)
         fields = data.model_dump(exclude_unset=True)
         content_edit = any(k in fields for k in ("customer_id", "description", "items", "tax_rate", "currency", "due_date"))
         if inv.status == "paid":
             raise Conflict("Paid invoices cannot be modified")
+        # Lock the invoice's open orders FIRST (the order a capture uses), then re-read the invoice: if a capture won the race
+        # the invoice is now paid and the change is refused; if this change wins, the capture is refused instead.
+        live = live_orders(self.db, inv.id, lock=True)
+        self.db.refresh(inv, with_for_update={"of": Invoice})
+        if inv.status == "paid":
+            raise Conflict("Paid invoices cannot be modified")
+        if live and (content_edit or fields.get("status") == "draft"):
+            raise Conflict("This invoice has an active payment link. Cancel the payment link before editing the invoice.", code="payment_link_active")
         if content_edit and inv.status not in ("draft",):
             raise Conflict("Only draft invoices can be edited")
+        if fields.get("status") == "cancelled":
+            for txn in live:  # cancelling the invoice cancels what a customer could still pay
+                void_order(self.db, txn, "The invoice was cancelled")
+            inv.payment_link = inv.payment_provider = None
+        if any(k in fields for k in self.PAYMENT_FIELDS):
+            inv.version = (inv.version or 1) + 1
         if "customer_id" in fields:
             self._check_customer(fields["customer_id"])
             inv.customer_id = fields["customer_id"]
@@ -113,6 +131,8 @@ class InvoiceService:
         inv = self.repo.get(id_)
         if inv.status != "draft":
             raise Conflict("Only draft invoices can be deleted")
+        if live_orders(self.db, inv.id, lock=True):
+            raise Conflict("This invoice has an active payment link. Cancel it before deleting the invoice.", code="payment_link_active")
         self.db.delete(inv)
         audit(self.db, self.user_id, "invoice.delete", "invoice", id_)
 

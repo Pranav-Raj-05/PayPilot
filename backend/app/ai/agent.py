@@ -4,17 +4,17 @@ Message lifecycle for sensitive actions (stored in ai_messages.tool_result.statu
 The model can only ever reach `prepared`; `executed` happens through the /actions/{id}/confirm endpoint."""
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.providers import LLMProvider, ToolCall
 from app.ai.tools import REGISTRY, ToolContext, tool_declarations
 from app.core.errors import AppError, Conflict, NotFound
 from app.models import AIConversation, AIMessage, utcnow
-from app.services.common import as_uuid, audit
+from app.services.common import as_uuid, audit, aware
 
 log = logging.getLogger("paypilot.agent")
 MAX_STEPS = 5
@@ -65,8 +65,21 @@ class Agent:
             out.pop(0)
         return out
 
+    def _next_timestamp(self, conv) -> datetime:
+        """A timestamp strictly after the conversation's latest message.
+
+        Messages are read back with `ORDER BY created_at`, but the messages of one turn are inserted microseconds apart and a coarse
+        clock (Windows, or a fast machine) gives them identical timestamps - the order of ties is undefined on SQLite and PostgreSQL,
+        which scrambled history sent to the LLM and shown in the UI. Making created_at strictly increasing per conversation (also
+        when the clock stalls or steps backwards) makes it a total order, with no schema change.
+        """
+        now = utcnow()
+        last = aware(self.db.scalar(select(func.max(AIMessage.created_at)).where(AIMessage.conversation_id == conv.id)))
+        return last + timedelta(microseconds=1) if last is not None and now <= last else now
+
     def _store(self, conv, role, content="", tool_name=None, tool_result=None) -> AIMessage:
-        m = AIMessage(conversation_id=conv.id, role=role, content=content, tool_name=tool_name, tool_result=tool_result)
+        m = AIMessage(conversation_id=conv.id, role=role, content=content, tool_name=tool_name, tool_result=tool_result,
+                      created_at=self._next_timestamp(conv))
         self.db.add(m)
         self.db.flush()
         conv.updated_at = utcnow()
@@ -120,7 +133,7 @@ class Agent:
     def _action(self, message_id) -> AIMessage:
         m = self.db.scalars(
             select(AIMessage).join(AIConversation, AIConversation.id == AIMessage.conversation_id)
-            .where(AIMessage.id == as_uuid(message_id), AIConversation.user_id == as_uuid(self.ctx.user_id), AIMessage.role == "tool").with_for_update()
+            .where(AIMessage.id == as_uuid(message_id), AIConversation.user_id == as_uuid(self.ctx.user_id), AIMessage.role == "tool").with_for_update(of=AIMessage)
         ).first()
         if not m or not m.tool_result or m.tool_result.get("status") not in ("prepared", "approved", "executed", "failed", "cancelled"):
             raise NotFound("Action not found")

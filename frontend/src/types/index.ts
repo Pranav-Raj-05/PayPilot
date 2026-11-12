@@ -9,12 +9,15 @@ export interface Invoice {
   subtotal: Money; tax: Money; total_amount: Money; currency: string; due_date: string | null; status: InvoiceStatus;
   payment_provider: "paypal" | "razorpay" | null; payment_link: string | null; items: InvoiceItem[]; created_at: string; updated_at: string;
 }
-export type TxStatus = "created" | "pending" | "completed" | "failed" | "refunded" | "cancelled";
+export type TxStatus = "created" | "pending" | "completed" | "partially_refunded" | "refunded" | "failed" | "cancelled";
+export interface Refund { id: string; provider_refund_id: string; amount: Money; currency: string; status: "pending" | "completed" | "failed"; source: string; reason: string | null; created_at: string }
 export interface TxEvent { type: string; at: string; detail: string | null }
 export interface Transaction {
   id: string; customer_id: string | null; customer: CustomerRef | null; invoice_id: string | null; invoice_number: string | null;
   provider: "paypal" | "razorpay"; provider_order_id: string | null; provider_capture_id: string | null; amount: Money; currency: string;
-  status: TxStatus; payment_method: string | null; fee_amount?: Money | null; net_amount?: Money | null; failure_reason: string | null; events: TxEvent[]; created_at: string; updated_at: string;
+  status: TxStatus; payment_method: string | null; fee_amount?: Money | null; net_amount?: Money | null; failure_reason: string | null; events: TxEvent[];
+  /** Sum of completed refunds; `amount` stays the original payment. */
+  refunded_amount?: Money; refunds?: Refund[]; created_at: string; updated_at: string;
 }
 export interface PaymentLink {
   id: string; customer_id: string | null; customer: CustomerRef | null; invoice_id: string | null; provider: "paypal" | "razorpay";

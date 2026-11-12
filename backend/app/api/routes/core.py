@@ -10,7 +10,7 @@ from app.api.deps import get_paypal, get_razorpay
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.core.errors import NotFound
-from app.core.ratelimit import rate_limit
+from app.core.ratelimit import ip_rate_limit, user_rate_limit
 from app.core.security import CurrentUser, get_current_user
 from app.models import Automation, Notification, Profile, WebhookEvent
 from app.payments.paypal.client import PayPalClient
@@ -116,7 +116,7 @@ def update_automation(automation_id: str, body: AutomationUpdate, user: CurrentU
     return a
 
 
-@automations_router.post("/{automation_id}/run", dependencies=[Depends(rate_limit("automation-run", 10))])
+@automations_router.post("/{automation_id}/run", dependencies=[Depends(user_rate_limit("automation-run", 10))])
 def run_automation(automation_id: str, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     a = _own(db, user, automation_id)
     return {"result": auto.run_automation(db, a), "last_executed_at": datetime.now(timezone.utc).isoformat()}

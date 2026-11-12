@@ -29,13 +29,14 @@ const STATUS: Record<string, string> = {
   completed: "bg-emerald-100 text-success", paid: "bg-emerald-100 text-success", active: "bg-emerald-100 text-success", executed: "bg-emerald-100 text-success",
   pending: "bg-amber-100 text-amber-ink", created: "bg-slate-100 text-muted", draft: "bg-slate-100 text-muted", prepared: "bg-primary-container text-primary-on",
   approved: "bg-primary-container text-primary-on", overdue: "bg-danger-container text-danger-dark", failed: "bg-danger-container text-danger-dark",
-  refunded: "bg-slate-200 text-muted", cancelled: "bg-slate-200 text-muted", expired: "bg-slate-200 text-muted",
+  refunded: "bg-slate-200 text-muted", partially_refunded: "bg-amber-100 text-amber-ink", cancelled: "bg-slate-200 text-muted", expired: "bg-slate-200 text-muted",
 };
 const DOT: Record<string, string> = { completed: "bg-success-bright", paid: "bg-success-bright", active: "bg-success-bright", pending: "bg-amber-glow", overdue: "bg-danger", failed: "bg-danger", refunded: "bg-outline" };
+const STATUS_LABEL: Record<string, string> = { partially_refunded: "partially refunded" };
 export const StatusBadge = ({ status, label }: { status: string; label?: string }) => (
   <span className={clsx("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-label text-[11px] font-semibold capitalize", STATUS[status] ?? "bg-slate-100 text-muted")}>
     <span className={clsx("h-1.5 w-1.5 rounded-full", DOT[status] ?? "bg-outline")} />
-    {label ?? status}
+    {label ?? STATUS_LABEL[status] ?? status}
   </span>
 );
 

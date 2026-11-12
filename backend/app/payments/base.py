@@ -23,3 +23,13 @@ class CaptureResult:
     fee: Decimal | None = None
     net: Decimal | None = None
     raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class RefundResult:
+    """Provider-normalised refund. status: completed | pending | failed. Every provider (PayPal now, Razorpay later) maps into this."""
+    provider_refund_id: str
+    status: str
+    amount: Decimal | None = None
+    currency: str | None = None
+    raw: dict = field(default_factory=dict)

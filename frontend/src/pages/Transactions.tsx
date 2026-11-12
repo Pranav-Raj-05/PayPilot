@@ -13,7 +13,7 @@ import { fmtDate, fmtTime, money, providerLabel, timeAgo } from "@/utils/format"
 import { useQuery } from "@tanstack/react-query";
 
 const EVENT: Record<string, string> = {
-  order_created: "Order Created", approved: "Buyer Approved", captured: "Payment Captured & Verified", invoice_paid: "Invoice Marked Paid", pending: "Payment Pending", failed: "Payment Failed",
+  order_created: "Order Created", approved: "Buyer Approved", captured: "Payment Captured & Verified", invoice_paid: "Invoice Marked Paid", pending: "Payment Pending", failed: "Payment Failed", refund_completed: "Refund Completed", refund_failed: "Refund Failed", payment_unmatched: "Payment Needs Review", refund_currency_mismatch: "Refund Flagged (currency)", refund_exceeds_payment: "Refund Flagged (too large)",
   cancelled: "Cancelled by Buyer", refunded: "Refunded", refund_pending: "Refund Pending", amount_mismatch: "Amount Mismatch Flagged", signature_invalid: "Invalid Signature Rejected",
 };
 const BAD = new Set(["failed", "amount_mismatch", "signature_invalid", "cancelled"]);
@@ -25,7 +25,10 @@ function Inspector({ id }: { id: string }) {
   if (error) return <Card><ErrorState error={error} /></Card>;
   if (!t) return <Card className="p-6"><Skeleton className="h-96" /></Card>;
   const gross = t.amount, fee = t.fee_amount;
-  const canRefund = t.provider === "paypal" && t.status === "completed" && !!t.provider_capture_id;
+  const refunded = t.refunded_amount ?? 0;
+  const inFlight = (t.refunds ?? []).filter((r) => r.status === "pending").reduce((sum, r) => sum + r.amount, 0);
+  const remaining = Math.round((t.amount - refunded - inFlight) * 100) / 100;
+  const canRefund = t.provider === "paypal" && (t.status === "completed" || t.status === "partially_refunded") && !!t.provider_capture_id && remaining > 0;
   return (
     <Card className="flex flex-col gap-5 p-5">
       <div className="flex items-start justify-between gap-3">
@@ -36,6 +39,7 @@ function Inspector({ id }: { id: string }) {
       <div className="rounded-xl bg-surface-low p-4 text-sm">
         <div className="mb-2 flex justify-between label-caps"><span>Settlement breakdown</span><span className="text-primary">{t.currency} primary</span></div>
         <div className="flex justify-between py-1"><span className="text-muted">Gross authorized</span><span className="font-semibold">{money(gross, t.currency)} {t.currency}</span></div>
+        {refunded > 0 && <div className="flex justify-between py-1"><span className="text-muted">Refunded</span><span className="font-semibold text-danger">-{money(refunded, t.currency)} {t.currency}</span></div>}
         <div className="flex justify-between border-b border-surface-high py-1"><span className="text-muted">{providerLabel(t.provider)} fee</span><span className="font-semibold text-danger">{fee != null ? `-${money(fee, t.currency)} ${t.currency}` : "Not reported"}</span></div>
         <div className="flex items-end justify-between pt-2"><div><div className="font-semibold">Net settled</div><div className="text-xs text-muted">Reported by the provider at capture</div></div>
           <span className="font-display text-2xl font-semibold text-primary">{t.net_amount != null ? `${money(t.net_amount, t.currency)} ${t.currency}` : "—"}</span></div>
@@ -45,6 +49,9 @@ function Inspector({ id }: { id: string }) {
           <div key={l} className="flex items-start justify-between gap-2 rounded-xl bg-surface-low p-3"><div className="min-w-0"><div className="text-[11px] text-muted">{l}</div><div className="break-all font-label text-xs font-semibold">{v ?? "—"}</div></div>{v && <CopyButton text={v} label="" />}</div>))}</div>
         {t.invoice_id && <div className="mt-2 flex items-center justify-between rounded-xl bg-surface-low px-3 py-2 text-sm"><span className="flex items-center gap-2 text-muted"><FileText className="h-4 w-4" />Linked invoice: <Link to={`/invoices/${t.invoice_id}`} className="font-semibold text-primary">#{t.invoice_number}</Link></span><span className="rounded bg-white px-2 py-0.5 text-[11px]">Direct link</span></div>}
       </div>
+      {!!t.refunds?.length && <div><div className="label-caps mb-2">Refunds</div>
+        <ul className="space-y-2">{t.refunds.map((r) => (
+          <li key={r.id} className="flex items-center justify-between gap-2 rounded-xl bg-surface-low px-3 py-2 text-sm"><span><span className="font-semibold">{money(r.amount, r.currency)}</span><span className="ml-2 text-xs text-muted">{fmtDate(r.created_at)}{r.reason ? ` · ${r.reason}` : ""}</span></span><StatusBadge status={r.status} /></li>))}</ul></div>}
       <div><div className="label-caps mb-2">Buyer context</div>
         <div className="flex items-center gap-3 rounded-xl bg-surface-low p-3"><Avatar name={t.customer?.name ?? "?"} size={44} /><div className="min-w-0 flex-1"><div className="font-semibold">{t.customer?.name ?? "Unassigned"}</div><div className="truncate text-xs text-muted">{t.customer?.email ?? "No email on file"}</div></div>
           <span className="rounded-lg bg-white px-2 py-1 text-xs capitalize shadow-card">{t.payment_method ?? "n/a"}</span></div></div>
@@ -54,7 +61,7 @@ function Inspector({ id }: { id: string }) {
             <div className="min-w-0 flex-1"><div className="flex justify-between gap-2 text-sm"><span className="font-medium">{EVENT[e.type] ?? e.type}</span><span className="text-xs text-muted">{fmtTime(e.at)}</span></div><div className="break-all text-xs text-muted">{fmtDate(e.at)}{e.detail ? ` · ${e.detail}` : ""}</div></div></li>))}
           {!t.events.length && <li className="text-sm text-muted">No lifecycle events recorded.</li>}</ol></div>
       {canRefund && <Button variant="danger" className="w-full" loading={refund.isPending} icon={<RefreshCcw className="h-4 w-4" />}
-        onClick={async () => { if (!confirm(`Refund ${money(t.amount, t.currency)} to the buyer via PayPal? This cannot be undone.`)) return; try { await refund.mutateAsync(t.id); toast("Refund issued"); } catch (e) { toast((e as Error).message, "error"); } }}>Issue Full Refund ({money(t.amount, t.currency)})</Button>}
+        onClick={async () => { if (!confirm(`Refund ${money(remaining, t.currency)} to the buyer via PayPal? This cannot be undone.`)) return; try { await refund.mutateAsync(t.id); toast("Refund issued"); } catch (e) { toast((e as Error).message, "error"); } }}>{refunded > 0 ? "Refund Remaining" : "Issue Full Refund"} ({money(remaining, t.currency)})</Button>}
     </Card>
   );
 }

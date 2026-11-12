@@ -283,7 +283,7 @@ def get_transaction(ctx: ToolContext, a: TransactionRefInput) -> dict:
 
 
 class ListTransactionsInput(BaseModel):
-    status: Literal["created", "pending", "completed", "failed", "refunded", "cancelled"] | None = None
+    status: Literal["created", "pending", "completed", "partially_refunded", "refunded", "failed", "cancelled"] | None = None
     period: Period = "last_30_days"
     limit: int = Field(10, ge=1, le=25)
 
@@ -309,11 +309,12 @@ def get_revenue_summary(ctx: ToolContext, a: RevenueInput) -> dict:
     cur = (a.currency or (None if svc.currencies() else ctx.default_currency))
     cur = svc.pick_currency(cur)
     start, end, label = resolve_period(a.period, svc.now)
-    done = [t for t in svc._txns(start, end, cur) if t.status == "completed"]
-    total = sum(float(t.amount) for t in done)
+    done = [t for t in svc._txns(start, end, cur) if t.status in ("completed", "partially_refunded")]
+    net = lambda t: float(t.amount) - float(t.refunded_amount or 0)  # what the merchant kept after partial refunds
+    total = sum(net(t) for t in done)
     by_provider: dict[str, float] = {}
     for t in done:
-        by_provider[t.provider] = round(by_provider.get(t.provider, 0) + float(t.amount), 2)
+        by_provider[t.provider] = round(by_provider.get(t.provider, 0) + net(t), 2)
     return {"period": label, "currency": cur, "revenue": round(total, 2), "payments": len(done),
             "average_payment": round(total / len(done), 2) if done else 0, "by_provider": by_provider}
 

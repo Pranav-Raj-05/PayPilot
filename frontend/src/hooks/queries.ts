@@ -45,4 +45,14 @@ export const useInvoiceSummary = () => useQuery({ queryKey: ["invoices", "summar
 export const useTxSummary = () => useQuery({ queryKey: ["transactions", "summary"], queryFn: () => get<TxSummary>("/api/transactions/summary"), refetchInterval: 15_000 });
 export const useLinkSummary = () => useQuery({ queryKey: ["links", "summary"], queryFn: () => get<LinkSummary>("/api/payment-links/summary") });
 export const useInvoiceActivity = (id?: string) => useQuery({ queryKey: ["invoice", id, "activity"], queryFn: () => get<Activity[]>(`/api/invoices/${id}/activity`), enabled: !!id });
-export const useRefund = () => useInvalidating((id: string) => post<Transaction>(`/api/transactions/${id}/refund`), ["transactions", "dashboard", "invoices", "invoice", "notifications", "analytics"]);
+// "transaction" (singular) is the details panel's key; "transactions" is the list/summary. Invalidation matches whole key elements, so both are needed.
+const REFUND_KEYS = ["transaction", "transactions", "dashboard", "invoices", "invoice", "notifications", "analytics"];
+export const useRefund = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => post<Transaction>(`/api/transactions/${id}/refund`),
+    // Returning the promise keeps the mutation pending until the visible queries have refetched, so the refund button cannot be
+    // clicked again while the panel still shows the old status.
+    onSuccess: () => Promise.all(REFUND_KEYS.map((k) => qc.invalidateQueries({ queryKey: [k] }))),
+  });
+};

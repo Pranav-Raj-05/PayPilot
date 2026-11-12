@@ -38,6 +38,9 @@ class FakeProviders:
         self.capture_mode = "completed"  # completed | declined | wrong_amount | not_approved
         self.webhook_valid = True
         self.rzp_payments: dict[str, dict] = {}
+        self.refunds: dict[str, dict] = {}  # refund id -> PayPal refund resource
+        self.refund_by_request: dict[str, dict] = {}  # PayPal-Request-Id -> refund (PayPal replays the first result)
+        self.refund_requests: list[dict] = []
         self.calls: list[tuple[str, str]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -66,8 +69,25 @@ class FakeProviders:
             oid = path.split("/")[-1]
             return httpx.Response(200, json=self._order_json(oid)) if oid in self.orders else httpx.Response(404, json={})
         if path.startswith("/v2/payments/captures/") and path.endswith("/refund"):
+            body = json.loads(request.content) if request.content else {}
+            rid_key = request.headers.get("paypal-request-id", "")
+            self.refund_requests.append({"capture": path.split("/")[-2], "body": body, "request_id": rid_key})
+            if rid_key and rid_key in self.refund_by_request:  # idempotent replay: same request id, same refund, no new refund
+                return httpx.Response(200, json=self.refund_by_request[rid_key])
             self.refund_calls = getattr(self, "refund_calls", 0) + 1
-            return httpx.Response(201, json={"id": "REF1", "status": getattr(self, "refund_status", "COMPLETED")})
+            amount = body.get("amount")
+            if amount is None:  # full refund of what was captured
+                oid = path.split("/")[-2].removeprefix("CAP-")
+                amt = self.orders[oid]["unit"]["amount"]
+                amount = {"value": amt["value"], "currency_code": amt["currency_code"]}
+            rec = {"id": f"REF{self.refund_calls}", "status": getattr(self, "refund_status", "COMPLETED"), "amount": amount}
+            self.refunds[rec["id"]] = rec
+            if rid_key:
+                self.refund_by_request[rid_key] = rec
+            return httpx.Response(201, json=rec)
+        if path.startswith("/v2/payments/refunds/") and method == "GET":
+            rid = path.split("/")[-1]
+            return httpx.Response(200, json=self.refunds[rid]) if rid in self.refunds else httpx.Response(404, json={"name": "RESOURCE_NOT_FOUND"})
         if path == "/v1/notifications/verify-webhook-signature":
             return httpx.Response(200, json={"verification_status": "SUCCESS" if self.webhook_valid else "FAILURE"})
         # Razorpay

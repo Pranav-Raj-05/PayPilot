@@ -6,7 +6,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
-from app.models import AuditLog, Notification
+from sqlalchemy import select
+
+from app.models import Automation, AuditLog, Notification
 
 log = logging.getLogger("paypilot.audit")
 
@@ -37,3 +39,17 @@ def notify(db: Session, user_id, title: str, message: str, kind: str = "info", d
     n = Notification(user_id=as_uuid(user_id), title=title, message=message, notification_type=kind, data=data)
     db.add(n)
     return n
+
+
+def payment_notifications_enabled(db: Session, user_id) -> bool:
+    """The "Payment notifications" automation switch. No row yet (a user who never opened Automations) means the default: on."""
+    a = db.scalars(select(Automation).where(Automation.user_id == as_uuid(user_id), Automation.automation_type == "payment_notifications")).first()
+    return True if a is None else bool(a.is_enabled)
+
+
+def notify_payment(db: Session, user_id, title: str, message: str, kind: str = "info", data: dict | None = None) -> Notification | None:
+    """In-app notification about a payment outcome (received / failed / refunded). Honors the user's automation switch.
+    Alerts about discrepancies (amount mismatch, unmatched payment, refund anomalies) use notify() directly and are never suppressed."""
+    if not payment_notifications_enabled(db, user_id):
+        return None
+    return notify(db, user_id, title, message, kind, data)

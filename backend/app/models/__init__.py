@@ -72,6 +72,9 @@ class Invoice(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|pending|paid|overdue|cancelled
     payment_provider: Mapped[str | None] = mapped_column(String(20))
     payment_link: Mapped[str | None] = mapped_column(Text)
+    # Bumped whenever something a payment depends on (items, tax, currency, customer) changes. Orders remember the version they
+    # were created for, so a payment for an older version can never mark the current invoice paid.
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -106,17 +109,21 @@ class Transaction(Base):
     provider_capture_id: Mapped[str | None] = mapped_column(String(100))
     amount: Mapped[Decimal] = mapped_column(MONEY)
     currency: Mapped[str] = mapped_column(String(3))
-    status: Mapped[str] = mapped_column(String(20), default="created")  # created|pending|completed|failed|refunded|cancelled
+    # created|pending|completed|partially_refunded|refunded|failed|cancelled
+    status: Mapped[str] = mapped_column(String(20), default="created")
     payment_method: Mapped[str | None] = mapped_column(String(50))
     fee_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     net_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     events: Mapped[list] = mapped_column(JSON, default=list)  # lifecycle timeline
+    invoice_version: Mapped[int | None] = mapped_column(Integer)  # Invoice.version this order was created for
+    refunded_amount: Mapped[Decimal] = mapped_column(MONEY, default=0, server_default="0")  # sum of COMPLETED refunds
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
     customer: Mapped["Customer | None"] = relationship(lazy="joined")
     invoice: Mapped["Invoice | None"] = relationship(lazy="joined")
+    refunds: Mapped[list["Refund"]] = relationship(lazy="selectin", order_by="Refund.created_at", cascade="all, delete-orphan")
 
     @property
     def invoice_number(self) -> str | None:
@@ -138,9 +145,33 @@ class PaymentLink(Base):
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="active")  # active|paid|expired|cancelled
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invoice_version: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = _created()
 
     customer: Mapped["Customer | None"] = relationship(lazy="joined")
+
+
+class Refund(Base):
+    """One refund of a payment. Rows are append-only history; Transaction.refunded_amount is derived from the COMPLETED ones."""
+    __tablename__ = "refunds"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_refund_id", name="uq_refund_provider_id"),
+        UniqueConstraint("transaction_id", "idempotency_key", name="uq_refund_idempotency"),
+        Index("ix_refunds_txn", "transaction_id"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"))
+    transaction_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(20))
+    provider_refund_id: Mapped[str] = mapped_column(String(100))
+    amount: Mapped[Decimal] = mapped_column(MONEY)
+    currency: Mapped[str] = mapped_column(String(3))
+    status: Mapped[str] = mapped_column(String(20), default="completed")  # pending|completed|failed
+    source: Mapped[str] = mapped_column(String(20), default="api")  # api | webhook | legacy
+    reason: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
 
 
 class AIConversation(Base):

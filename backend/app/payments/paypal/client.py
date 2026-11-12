@@ -8,7 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.errors import NotConfigured, ProviderError
-from app.payments.base import CaptureResult, CreatedOrder
+from app.payments.base import CaptureResult, CreatedOrder, RefundResult
 
 log = logging.getLogger("paypilot.paypal")
 
@@ -107,12 +107,29 @@ class PayPalClient:
             return CaptureResult(status="failed", order_id=order_id, reason=f"Payment declined ({issue})")
         raise ProviderError("PayPal capture failed", details=_err(r))
 
-    def refund_capture(self, capture_id: str, request_id: str) -> str:
-        """Full refund of a capture. Returns PayPal's refund status (COMPLETED | PENDING | ...)."""
-        r = self._request("POST", f"/v2/payments/captures/{capture_id}/refund", json={}, request_id=request_id)
+    def refund_capture(self, capture_id: str, request_id: str, *, amount: Decimal | None = None, currency: str | None = None,
+                       note: str | None = None) -> RefundResult:
+        """Refund a capture, in full (no amount) or in part. `request_id` is PayPal's idempotency key: the same id never refunds twice."""
+        body: dict = {}
+        if amount is not None:
+            if not currency:
+                raise ProviderError("A currency is required for a partial refund")
+            body["amount"] = {"value": fmt_amount(amount, currency), "currency_code": currency}
+        if note:
+            body["note_to_payer"] = note[:255]
+        r = self._request("POST", f"/v2/payments/captures/{capture_id}/refund", json=body, request_id=request_id)
         if r.status_code not in (200, 201):
             raise ProviderError("PayPal could not refund this payment", details=_err(r))
-        return r.json().get("status", "PENDING")
+        return parse_refund(r.json(), amount, currency)
+
+    def get_refund(self, refund_id: str) -> RefundResult:
+        """Read a refund back from PayPal. Webhook bodies are never trusted for amounts: this is the source of truth."""
+        r = self._request("GET", f"/v2/payments/refunds/{refund_id}")
+        if r.status_code == 404:
+            raise ProviderError("PayPal refund not found", status_code=404, code="provider_not_found")
+        if r.status_code != 200:
+            raise ProviderError("PayPal could not fetch the refund", details=_err(r))
+        return parse_refund(r.json())
 
     # ---- Webhooks
     def verify_webhook(self, headers: dict[str, str], event: dict) -> bool:
@@ -165,3 +182,14 @@ def parse_capture(order: dict) -> CaptureResult:
     return CaptureResult(status=mapped, order_id=oid, capture_id=cap.get("id"), fee=fee, net=net,
                          amount=Decimal(cap["amount"]["value"]), currency=cap["amount"]["currency_code"],
                          payment_method=method, reason=None if mapped != "failed" else f"Capture {st}", raw=order)
+
+
+_REFUND_STATUS = {"COMPLETED": "completed", "PENDING": "pending", "FAILED": "failed", "CANCELLED": "failed"}
+
+
+def parse_refund(body: dict, fallback_amount: Decimal | None = None, fallback_currency: str | None = None) -> RefundResult:
+    """Normalise a PayPal refund resource. Unknown statuses are treated as pending (not as money returned)."""
+    amt = body.get("amount") or {}
+    amount = Decimal(amt["value"]) if amt.get("value") is not None else fallback_amount
+    return RefundResult(provider_refund_id=str(body.get("id", "")), status=_REFUND_STATUS.get(str(body.get("status", "")).upper(), "pending"),
+                        amount=amount, currency=amt.get("currency_code") or fallback_currency, raw=body)

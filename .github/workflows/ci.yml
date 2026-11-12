@@ -10,6 +10,50 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
+  # PostgreSQL job. The service container is a disposable, empty postgres:17 server that exists only for this job run and
+  # is discarded afterwards. No Supabase project is involved and no repository secret is used: trust auth on a throw-away
+  # server that is reachable only from the runner. The tests create and drop their own databases (pp_test_* / pp_mig_*)
+  # on it. See docs/postgres-testing.md for what this does and does not prove (it is NOT a Supabase test).
+  backend-postgres:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres@localhost:5432/postgres
+      ALLOW_DESTRUCTIVE_PG_TESTS: "1"
+      PG_TEST_ALLOWED_HOSTS: localhost
+    steps:
+      # full history: test_migrations_postgres.py builds a database from the FIRST version of init_schema.sql (git show 963fb99:...);
+      # in a shallow clone that object does not exist and the test would silently skip.
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - name: Migration tests (PostgreSQL)
+        run: python -m pytest tests/test_migrations_postgres.py -q -rs
+      - name: Profile concurrency tests (PostgreSQL)
+        run: python -m pytest tests/test_profile_concurrency.py -q -rs
+      - name: Cancel-versus-capture race test (PostgreSQL)
+        run: python -m pytest "tests/test_money_integrity.py::test_d2_cancel_and_capture_race_on_postgresql" -q -rs
+      - name: PostgreSQL test-safety tests
+        run: python -m pytest tests/test_pg_test_safety.py -q -rs
+      - name: Full backend suite with PostgreSQL enabled
+        run: python -m pytest -q -rs
+      - name: Full backend suite on the migrated schema
+        run: python -m pytest tests -p tests.support.pg_migrated -q -rs
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }

@@ -11,4 +11,4 @@ Prereqs: backend + frontend running with sandbox credentials; a PayPal **sandbox
 7. **Negative:** `curl -X POST <api>/api/webhooks/paypal -d '{}'` → 401. Calling `capture-order` with another user's token → 404.
 8. **Razorpay (optional, INR):** create an INR invoice → *Create Razorpay link* → pay with test UPI `success@razorpay` / test card `4111 1111 1111 1111`.
 
-Automated tests (mocked providers): `cd backend && pip install -r requirements-dev.txt && pytest -q` and `cd frontend && npm test`.
+Automated tests (mocked providers): `cd backend && pip install -r requirements-dev.txt && pytest -q` and `cd frontend && npm test`. PostgreSQL-backed tests (opt-in, disposable server only): see `docs/postgres-testing.md`.

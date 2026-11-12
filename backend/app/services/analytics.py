@@ -18,8 +18,16 @@ def _pct(cur: float, prev: float) -> float | None:
     return round((cur - prev) / prev * 100, 1)
 
 
+PAID = ("completed", "partially_refunded")  # payments that settled and are not fully refunded
+
+
+def _net(t: Transaction) -> float:
+    """What the merchant kept: the payment minus completed refunds."""
+    return float(t.amount) - float(t.refunded_amount or 0)
+
+
 def _rate(txns: list[Transaction]) -> float | None:
-    done = sum(1 for t in txns if t.status == "completed")
+    done = sum(1 for t in txns if t.status in PAID)
     failed = sum(1 for t in txns if t.status == "failed")
     return round(done / (done + failed) * 100, 1) if done + failed else None
 
@@ -49,12 +57,12 @@ class AnalyticsService:
         n = 12 if monthly else days
         buckets = [0.0] * n
         for t in txns:
-            if t.status != "completed":
+            if t.status not in PAID:
                 continue
             d = aware(t.created_at)
             idx = ((d.year - start.year) * 12 + d.month - start.month) if monthly else (d - start).days
             if 0 <= idx < n:
-                buckets[idx] += float(t.amount)
+                buckets[idx] += _net(t)
         return [round(b, 2) for b in buckets]
 
     def overview(self, days: int = 30, currency: str | None = None) -> dict:
@@ -64,8 +72,8 @@ class AnalyticsService:
         prev_start = start - timedelta(days=days)
         cur = self._txns(start, self.now + timedelta(seconds=1), currency)
         prev = self._txns(prev_start, start, currency)
-        revenue = sum((float(t.amount) for t in cur if t.status == "completed"), 0.0)
-        prev_revenue = sum((float(t.amount) for t in prev if t.status == "completed"), 0.0)
+        revenue = sum((_net(t) for t in cur if t.status in PAID), 0.0)
+        prev_revenue = sum((_net(t) for t in prev if t.status in PAID), 0.0)
         today = self.now.replace(hour=0, minute=0, second=0, microsecond=0)
         processed_today = sum(1 for t in cur if aware(t.created_at) >= today)
 
@@ -92,7 +100,7 @@ class AnalyticsService:
             "success_rate": {"value": rate, "previous": prev_rate,
                              "change_pct": None if rate is None or prev_rate is None else round(rate - prev_rate, 1),
                              "failed_pct": round(sum(1 for t in cur if t.status == "failed") / total * 100, 1) if total else 0,
-                             "refunded_pct": round(sum(1 for t in cur if t.status == "refunded") / total * 100, 1) if total else 0},
+                             "refunded_pct": round(sum(1 for t in cur if t.status in ("refunded", "partially_refunded")) / total * 100, 1) if total else 0},
             "recent_transactions": recent,
             "insights": self.insights(cur, prev, revenue, prev_revenue, overdue, currency),
         }
@@ -112,8 +120,8 @@ class AnalyticsService:
                         "text": f"{len(overdue)} overdue invoice(s) totalling {currency} {total:,.2f} need attention."})
         by_day: dict[int, float] = defaultdict(float)
         for t in cur:
-            if t.status == "completed":
-                by_day[aware(t.created_at).weekday()] += float(t.amount)
+            if t.status in PAID:
+                by_day[aware(t.created_at).weekday()] += _net(t)
         if by_day and revenue:
             d, v = max(by_day.items(), key=lambda kv: kv[1])
             out.append({"kind": "pattern", "title": "Temporal Pattern", "tone": "neutral",
@@ -128,20 +136,20 @@ class AnalyticsService:
         ov = self.overview(days, currency)
         start = self.now - timedelta(days=days)
         cur = self._txns(start, self.now + timedelta(seconds=1), ov["currency"])
-        done = [t for t in cur if t.status == "completed"]
+        done = [t for t in cur if t.status in PAID]
         by_customer: dict[str, dict] = {}
         for t in done:
             name = t.customer.name if t.customer else "Unassigned"
             row = by_customer.setdefault(name, {"customer": name, "revenue": 0.0, "payments": 0})
-            row["revenue"] = round(row["revenue"] + float(t.amount), 2)
+            row["revenue"] = round(row["revenue"] + _net(t), 2)
             row["payments"] += 1
         by_provider: dict[str, float] = defaultdict(float)
         by_status: dict[str, int] = defaultdict(int)
         for t in cur:
             by_status[t.status] += 1
-            if t.status == "completed":
-                by_provider[t.provider] += float(t.amount)
-        avg = round(sum(float(t.amount) for t in done) / len(done), 2) if done else 0.0
+            if t.status in PAID:
+                by_provider[t.provider] += _net(t)
+        avg = round(sum(_net(t) for t in done) / len(done), 2) if done else 0.0
         return {
             "currency": ov["currency"], "days": days, "revenue": ov["revenue"], "success_rate": ov["success_rate"],
             "volume": {"total": len(cur), "by_status": dict(by_status), "series": self.volume_series(cur, start, days)},
@@ -189,14 +197,15 @@ def transaction_summary(db: Session, user_id, currency: str | None = None) -> di
     cur = AnalyticsService(db, uid).pick_currency(currency)
     rows = list(db.scalars(select(Transaction).where(Transaction.user_id == uid, Transaction.currency == cur)).unique().all())
     pick = lambda st: [t for t in rows if t.status in st]
-    done, failed = pick({"completed"}), pick({"failed"})
+    done, failed = pick(set(PAID)), pick({"failed"})
+    refunded = pick({"refunded", "partially_refunded"})
     return {
         "currency": cur, "total": {"volume": money_sum(rows, "amount"), "count": len(rows)},
-        "settled": {"total": money_sum(done, "amount"), "count": len(done),
+        "settled": {"total": round(sum(_net(t) for t in done), 2), "count": len(done),
                     "rate": round(len(done) / (len(done) + len(failed)) * 100, 1) if done or failed else None},
         "pending": {"total": money_sum(pick({"created", "pending"}), "amount"), "count": len(pick({"created", "pending"}))},
         "failed": {"total": money_sum(failed, "amount"), "count": len(failed)},
-        "refunded": {"total": money_sum(pick({"refunded"}), "amount"), "count": len(pick({"refunded"}))},
+        "refunded": {"total": money_sum(refunded, "refunded_amount"), "count": len(refunded)},
     }
 
 

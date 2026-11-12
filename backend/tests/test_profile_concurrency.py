@@ -9,21 +9,46 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from tests import pg_safety
 from tests.conftest import make_token
 
 WORKERS = 16
 ROUNDS = 5
 
 
+def _is_sqlite(url: str) -> bool:
+    return url.strip().lower().startswith("sqlite")
+
+
+def _guard_destructive_target(url: str) -> None:
+    """Refuse (UnsafeDatabaseTarget) BEFORE any engine/connection exists unless `url` is a disposable PostgreSQL database."""
+    if _is_sqlite(url):
+        return
+    pg_safety.assert_safe_destructive_target(url)  # opt-in, host/URL rules, safe database name
+
+
 def _boot(url: str):
+    """Rebuild the schema in `url` and return the app. Drops/creates tables, so for PostgreSQL it is only ever allowed on a
+    disposable local server and a database named pp_test_*/pp_mig_*; anything else raises UnsafeDatabaseTarget."""
+    _guard_destructive_target(url)
+    if not _is_sqlite(url):
+        url = pg_safety.normalize_url(url)  # explicit port: neither SQLAlchemy nor libpq may fall back to PGPORT
+
     from app.core import db as dbmod, ratelimit
     from app.core.config import get_settings
     from app.main import create_app
     from app.models import Base
 
+    engine = dbmod.init_engine(url)
+    if not _is_sqlite(url):
+        try:  # defense in depth: verify what we are REALLY connected to before the first DROP
+            with engine.connect() as conn:
+                pg_safety.verify_connection(conn, url)  # current_database() must be a safe name AND the one the URL names; server must be disposable
+        except BaseException:
+            engine.dispose()
+            raise
     os.environ["DATABASE_URL"] = url
     get_settings.cache_clear()
-    engine = dbmod.init_engine(url)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     ratelimit.reset()
@@ -40,12 +65,12 @@ def file_sqlite_client(providers, tmp_path):
 
 @pytest.fixture
 def postgres_client(providers):
-    url = os.environ.get("TEST_POSTGRES_URL")
-    if not url:
-        pytest.skip("set TEST_POSTGRES_URL=postgresql://user:pass@host/db to run the PostgreSQL variant")
-    app = _boot(url)
-    with TestClient(app) as c:
-        yield c
+    """PostgreSQL variant on a UNIQUE throw-away database created (and always dropped) on the disposable server named by
+    TEST_POSTGRES_URL. Skips unless TEST_POSTGRES_URL and ALLOW_DESTRUCTIVE_PG_TESTS=1 are set. Never touches the admin database."""
+    with pg_safety.temp_database("pp_test") as url:
+        app = _boot(url)
+        with TestClient(app) as c:
+            yield c
 
 
 def _count_profiles(user_id: str) -> int:
