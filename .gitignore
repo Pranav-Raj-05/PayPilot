@@ -12,3 +12,4 @@ venv/
 .vercel/
 .netlify/
 coverage/
+supabase/.temp/

@@ -10,7 +10,7 @@ The default test suite runs on in-memory SQLite. That cannot exercise PostgreSQL
 
 | Area | Test | What it checks |
 |---|---|---|
-| Migrations | `backend/tests/test_migrations_postgres.py` | The three migrations apply on a fresh database (with the compatibility shim), the money-integrity migration is rerunnable, fails closed on unexpected CHECK constraints, preserves trigger states, backfills only what it should, and honours the lock-timeout override |
+| Migrations | `backend/tests/test_migrations_postgres.py` | The four migrations apply on a fresh database (with the compatibility shim), the money-integrity migration is rerunnable, fails closed on unexpected CHECK constraints, preserves trigger states, backfills only what it should, and honours the lock-timeout override; `refunds` is private even when the file runs statement by statement; the client-write hardening makes invoices, invoice items and the financial tables read-only for clients (and `anon` has nothing) while the owner path keeps writing; reruns change nothing; the signup trigger function `handle_new_user()` is not directly executable by `PUBLIC`, `anon` or `authenticated` while signup still creates the profile; the optional `seed_paypilot_demo` function is not executable by `PUBLIC`, `anon` or `authenticated` (the owner keeps it; `service_role` is left untouched, and its access on a real project depends on that project's default privileges) |
 | Profile concurrency | `backend/tests/test_profile_concurrency.py` | Concurrent first requests create exactly one profile (PostgreSQL and file-SQLite) |
 | Cancel versus capture | `backend/tests/test_money_integrity.py::test_d2_cancel_and_capture_race_on_postgresql` | A capture and a concurrent invoice cancel serialize on row locks and exactly one wins |
 | Test safety | `backend/tests/test_pg_test_safety.py` | The guard rails in section 2 refuse unsafe targets |
@@ -138,7 +138,7 @@ python -m pytest tests -p tests.support.pg_migrated -q -rs
 
 Without PostgreSQL (the default developer run and the plain CI `backend` job), unset both variables and run `pytest -q`: the PostgreSQL tests are skipped.
 
-Step 6 uses `python -m pytest` so that the `tests` package is importable when the plugin loads. The plugin (`backend/tests/support/pg_migrated.py`) creates **one** throw-away `pp_mig_*` database per pytest session, applies `tests/support/supabase_shim.sql` and the three real migrations, points the in-memory-SQLite `client` fixtures at that database and truncates the data tables before each test. The application connects as the database owner, which bypasses RLS, so RLS is covered by the migration tests, not by this run. Tests that bring their own databases (`test_migrations_postgres.py`, the `postgres_client` tests: profile-concurrency PostgreSQL variants and the race test) are deselected while the plugin is active, which is why steps 1 to 3 run separately. Without the opt-in variables the plugin skips every test rather than silently falling back to SQLite. See the module docstring for the full list of limitations.
+Step 6 uses `python -m pytest` so that the `tests` package is importable when the plugin loads. The plugin (`backend/tests/support/pg_migrated.py`) creates **one** throw-away `pp_mig_*` database per pytest session, applies `tests/support/supabase_shim.sql` and the four real migrations, points the in-memory-SQLite `client` fixtures at that database and truncates the data tables before each test. The application connects as the database owner, which bypasses RLS, so RLS is covered by the migration tests, not by this run. Tests that bring their own databases (`test_migrations_postgres.py`, the `postgres_client` tests: profile-concurrency PostgreSQL variants and the race test) are deselected while the plugin is active, which is why steps 1 to 3 run separately. Without the opt-in variables the plugin skips every test rather than silently falling back to SQLite. See the module docstring for the full list of limitations.
 
 Frontend (no PostgreSQL involved):
 
@@ -214,8 +214,8 @@ Do this on a Supabase **development branch** (or a throw-away project), never di
 
 1. **Branch or back up first.** The migration is forward-only: there is no automatic down migration. Create the branch from production schema (or take a backup) so you can discard it.
 2. **Read-only inspection first.** Before applying anything, list tables, constraints and triggers on the branch. Confirm the schema matches `20260101000000_init_schema.sql` and `20260101000100_rls_policies.sql`: in particular the CHECK constraints on `transactions(status)`, the `touch_updated_at` trigger on `transactions`, `transactions.fee_amount` / `net_amount`, and the owner role you will connect as.
-3. **Apply the migration files individually, in order**, through the SQL editor or `supabase db push` and note whether the runner wraps each file in a transaction. Do not apply `tests/support/supabase_shim.sql`.
-4. **Expected objects afterwards:** the `refunds` table, `invoices.version`, `transactions.refunded_amount` and `transactions.invoice_version` columns, `payment_links.invoice_version`, `transactions_status_check` allowing `partially_refunded`, RLS enabled on the new table, and the original triggers in their original enabled state. A failure with a message beginning `money_integrity:` means a guard refused to touch an unexpected CHECK constraint: read the message, do not work around it.
+3. **Apply the four migration files individually, in order**, through the SQL editor or `supabase db push` (one method only: the SQL editor records no history) and note whether the runner wraps each file in a transaction. The first two files are not rerunnable. Do not apply `tests/support/supabase_shim.sql`.
+4. **Expected objects afterwards:** the `refunds` table, `invoices.version`, `transactions.refunded_amount` and `transactions.invoice_version` columns, `payment_links.invoice_version`, `transactions_status_check` allowing `partially_refunded`, RLS enabled on the new table, the original triggers in their original enabled state, only `invoices_select` and `invoice_items_select` policies on the invoice tables (no `invoices_all`), `authenticated` holding SELECT only on `invoices`, `invoice_items`, `payment_links`, `transactions`, `refunds`, `audit_logs` and `ai_messages`, and `anon` holding no privileges in `public`. A failure with a message beginning `money_integrity:` means a guard refused to touch an unexpected CHECK constraint: read the message, do not work around it.
 5. **Do not run the pytest suite against Supabase.** The fixtures create and drop databases and the shim must never be applied there. `pg_safety` refuses Supabase hosts on purpose.
 6. **Run the security and performance advisors** on the branch afterwards and review new findings.
 7. **Deploy order:** migrate first, then deploy the backend. After the cutover, run the migration's backfill once more (re-running the file is safe) to cover orders created between the migration and the backend deploy.
@@ -223,29 +223,29 @@ Do this on a Supabase **development branch** (or a throw-away project), never di
 
 ## 10. Recorded results (for comparison)
 
-Measured after the libpq 17 environment-variable classification fix, on a local PostgreSQL **16.2** (Windows; a throw-away server). CI runs the same commands on PostgreSQL **17**, which has NOT been run locally (not available on the development machine). Counts will grow as tests are added; treat them as a sanity reference, not a contract.
+Measured after the client-write hardening migration, on a local PostgreSQL **16.2** (Windows; a throw-away server). CI runs the same commands on PostgreSQL **17**, which has NOT been run locally (not available on the development machine). Counts will grow as tests are added; treat them as a sanity reference, not a contract.
 
 With the PostgreSQL variables **set** (`TEST_POSTGRES_URL`, `ALLOW_DESTRUCTIVE_PG_TESTS=1`):
 
 | Command | Result |
 |---|---|
-| `tests/test_migrations_postgres.py` | 60 passed (3 consecutive runs) |
+| `tests/test_migrations_postgres.py` | 91 passed (3 consecutive runs) |
 | `tests/test_pg_test_safety.py` | 288 passed |
 | `tests/test_profile_concurrency.py` | 12 passed (5 consecutive runs) |
 | Race test `test_d2_cancel_and_capture_race_on_postgresql` | 1 passed (5 consecutive runs) |
 | `tests/test_money_integrity.py` (includes the race test) | 87 passed |
-| Complete backend suite, PostgreSQL enabled | 523 passed, 0 failed, 0 skipped |
-| `pytest tests -p tests.support.pg_migrated` (migrated schema) | 364 passed, 159 deselected (the modules that bring their own databases), 1 warning (see below); 2 consecutive runs |
+| Complete backend suite, PostgreSQL enabled | 554 passed, 0 failed, 0 skipped (2 consecutive runs) |
+| `pytest tests -p tests.support.pg_migrated` (migrated schema) | 364 passed, 190 deselected (the modules that bring their own databases), 1 warning (see below); 2 consecutive runs |
 
 With the PostgreSQL variables **unset** (the default developer run and the plain CI `backend` job): PostgreSQL tests skip with an explanatory reason and nothing connects.
 
 | Command | Result |
 |---|---|
-| `tests/test_migrations_postgres.py` | 8 passed (static), 52 skipped |
+| `tests/test_migrations_postgres.py` | 20 passed (static), 71 skipped |
 | `tests/test_pg_test_safety.py` | 284 passed, 4 skipped |
 | `tests/test_profile_concurrency.py` | 7 passed (file-SQLite variants), 5 skipped |
-| Complete backend suite | 461 passed, 62 skipped |
-| `pytest tests -p tests.support.pg_migrated` | 364 skipped, 159 deselected |
+| Complete backend suite | 473 passed, 81 skipped |
+| `pytest tests -p tests.support.pg_migrated` | 364 skipped, 190 deselected |
 
 Frontend: `cd frontend && npm test` = 19 test files, 438 tests passed; `npm run build` succeeds.
 

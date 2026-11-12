@@ -130,6 +130,15 @@ create table if not exists public.refunds (
   constraint uq_refund_provider_id unique (provider, provider_refund_id),
   constraint uq_refund_idempotency unique (transaction_id, idempotency_key)  -- NULL keys never collide
 );
+-- Lock the new table down IMMEDIATELY. Supabase's default privileges give anon/authenticated/service_role full access to every new table in
+-- public, so the table is made private right after it is created and BEFORE any row (the legacy backfill below) exists. This leaves no window
+-- even if a tool runs this file statement by statement. Reads stay possible for the signed-in owner through the refunds_select policy (created
+-- at the end of this file; until then RLS with no policy returns no rows). Clients never write refunds: only the backend (table owner) does.
+alter table public.refunds enable row level security;
+revoke all on public.refunds from anon;
+revoke all on public.refunds from authenticated;
+grant select on public.refunds to authenticated;
+
 create index if not exists ix_refunds_txn on public.refunds(transaction_id);
 create index if not exists ix_refunds_user on public.refunds(user_id, created_at desc);
 

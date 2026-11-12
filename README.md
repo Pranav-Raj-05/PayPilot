@@ -14,7 +14,7 @@ Small businesses chase payments by hand: write an invoice, create a payment link
 * **Webhooks** — PayPal webhook signatures are verified; processing is retry-safe and de-duplicated.
 * **App** — Overview, AI Assistant, Transactions (+ lifecycle drawer), Invoices, Invoice editor, Payment Links (+QR), Customers, Analytics, Automations, Settings, auth (register / login / reset), protected routes. Figures come from the database; empty accounts show empty states.
 * **Automations implemented** — daily revenue summary, failed-payment monitor, overdue-reminder suggestions (drafted for approval; **no email/SMS is sent**), event-driven payment notifications.
-* **Security** — Supabase JWT verification, ownership-scoped data access, row-level security on all tables (financial tables read-only to clients), rate limiting, audit log, safe error responses, no secrets in the frontend.
+* **Security** — Supabase JWT verification, ownership-scoped data access, row-level security on all tables (invoices and all financial tables read-only to clients, so invoice amounts and payment status can only change through the backend), rate limiting, audit log, safe error responses, no secrets in the frontend.
 
 ## How PayPilot uses PayPal
 * **PayPal Orders v2** against the Sandbox (`PAYPAL_BASE_URL`): create order → buyer approves on PayPal → capture on the backend.
@@ -107,7 +107,7 @@ VITE_SUPABASE_ANON_KEY=<anon key>
 ```
 
 ## Database
-SQL migrations are in `supabase/migrations/` and are applied in order: `init_schema`, `rls_policies`, then `money_integrity` (required by the current backend: invoice versioning, refunds table, `partially_refunded` status). They are tested on a local PostgreSQL 16.2 only; they have **not** been run against a live Supabase project by the automated checks, and PostgreSQL 17 (the Supabase version) has not been tested. See [docs/deployment.md](docs/deployment.md) and [docs/postgres-testing.md](docs/postgres-testing.md).
+SQL migrations are in `supabase/migrations/` and are applied in order: `init_schema`, `rls_policies`, `money_integrity` (required by the current backend: invoice versioning, refunds table, `partially_refunded` status), then `client_write_hardening` (makes invoices and the financial tables read-only for signed-in clients and keeps the signup trigger function off the Data API; the backend is unaffected because it connects as the table owner). They are tested on a local PostgreSQL 16.2 only; they have **not** been run against a live Supabase project by the automated checks, and PostgreSQL 17 (the Supabase version) has not been tested. See [docs/deployment.md](docs/deployment.md) and [docs/postgres-testing.md](docs/postgres-testing.md).
 
 ## Deployment
 * Backend: [render.yaml](render.yaml) (Docker, health check `/health`). Frontend: `frontend/vercel.json` or `frontend/netlify.toml` (static Vite build with SPA rewrite).

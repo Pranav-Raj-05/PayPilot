@@ -1,4 +1,5 @@
-"""Money-integrity migration checks (supabase/migrations/20260102000000_money_integrity.sql).
+"""Money-integrity migration checks (supabase/migrations/20260102000000_money_integrity.sql) and the client-write hardening that follows it
+(supabase/migrations/20260102000100_client_write_hardening.sql).
 
 * Static checks of the SQL text run everywhere and never connect to anything.
 * PostgreSQL checks need the opt-in environment (see tests/pg_safety.py): TEST_POSTGRES_URL = admin URL of a DISPOSABLE local server and
@@ -23,7 +24,10 @@ from tests import pg_safety
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / "supabase" / "migrations"
-INIT, RLS, MONEY = (MIGRATIONS / n for n in ("20260101000000_init_schema.sql", "20260101000100_rls_policies.sql", "20260102000000_money_integrity.sql"))
+INIT, RLS, MONEY, HARDEN = (MIGRATIONS / n for n in ("20260101000000_init_schema.sql", "20260101000100_rls_policies.sql", "20260102000000_money_integrity.sql",
+                                                        "20260102000100_client_write_hardening.sql"))
+BACKFILL_MARK = "-- ---------------------------------------------------------------- backfill existing transactions"  # first statement after refunds is created
+SEED = ROOT / "supabase" / "seed.sql"  # optional demo data function, run by the project owner; NOT a migration
 SHIM = pathlib.Path(__file__).parent / "support" / "supabase_shim.sql"
 FIRST_INIT_COMMIT = "963fb99"  # init_schema.sql as first committed: transactions has no fee_amount / net_amount
 SIX = ("created", "pending", "completed", "failed", "refunded", "cancelled")
@@ -100,6 +104,15 @@ class TestMigrationText:
     def test_the_script_has_no_transaction_control_of_its_own(self):
         low = _norm(re.sub(r"(?is)\bdo\s+(\$\w*\$).*?\1\s*;", "", self._sql()))  # DO blocks contain their own BEGIN ... END
         assert not re.search(r"(^|;) ?(begin|commit|rollback)\b", low)  # the caller decides: one simple-query call is atomic already
+
+    def test_refunds_is_locked_down_right_after_it_is_created_and_before_any_row_exists(self):
+        low = _norm(self._sql())
+        created, first_row = low.index("create table if not exists public.refunds"), low.index("insert into public.refunds")
+        for stmt in ("alter table public.refunds enable row level security;", "revoke all on public.refunds from anon;",
+                     "revoke all on public.refunds from authenticated;", "grant select on public.refunds to authenticated;"):
+            assert created < low.index(stmt) < first_row, stmt  # no window, even when a tool runs the file statement by statement
+        assert low.index("revoke all on public.refunds from authenticated;") < low.index("grant select on public.refunds to authenticated;")
+        assert "create policy refunds_select on public.refunds for select to authenticated" in low  # the owner can still read their own refunds
 
 
 # ------------------------------------------------------------------ PostgreSQL helpers
@@ -632,8 +645,10 @@ class TestRefundsTable:
         assert as_user(USER_B, "select * from public.refunds") == []  # another user sees nothing
         with pytest.raises(psycopg.errors.InsufficientPrivilege):  # clients cannot create, change or delete refunds
             as_user(USER_A, "insert into public.refunds (user_id, transaction_id, provider, provider_refund_id, amount, currency) values (%s, %s, 'paypal', 'FORGED', 1, 'USD')", (USER_A, ids["completed"]))
-        assert as_user(USER_A, "update public.refunds set amount = 1 returning id") == []  # no UPDATE policy: zero rows visible to change
-        assert as_user(USER_A, "delete from public.refunds returning id") == []
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):  # clients hold SELECT only (revoked at the GRANT level, not just filtered by RLS)
+            as_user(USER_A, "update public.refunds set amount = 1 returning id")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            as_user(USER_A, "delete from public.refunds returning id")
         assert db.one("select amount from public.refunds where provider_refund_id = 'RA'")[0] == 5
         db.run("set role anon")  # the anonymous role has no access at all
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -851,3 +866,411 @@ class TestStatusListComparedAsASet:
             db.apply(MONEY)
         assert_migration_not_applied(db, before)
         assert "odd_status_rule" in txn_checks(db)  # not dropped
+
+
+# ================================================================== client write hardening (20260102000100) and the refunds lockdown
+READ_ONLY_FOR_CLIENTS = ("invoices", "invoice_items", "payment_links", "transactions", "refunds", "audit_logs", "ai_messages")
+CLIENT_WRITABLE = ("customers", "profiles", "notifications", "automations", "ai_conversations")
+PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+
+
+def _privs(db: Db, role: str, table: str) -> set:
+    return {p for p in PRIVS if db.one("select has_table_privilege(%s, %s, %s)", (role, f"public.{table}", p))[0]}
+
+
+def _as(db: Db, role: str, uid, sql: str, params=None):
+    """Run one statement as a Data-API role (the shim's claim settings stand in for the JWT). Always resets the role."""
+    db.run("select set_config('request.jwt.claim.sub', %s, false), set_config('request.jwt.claim.role', %s, false)", (uid or "", role))
+    db.run(f"set role {role}")
+    try:
+        cur = db.run(sql, params)
+        return cur.fetchall() if cur.description else []
+    finally:
+        db.run("reset role")
+
+
+class TestClientWriteHardeningText:
+    def _sql(self):
+        return HARDEN.read_text(encoding="utf-8")
+
+    def test_the_migration_files_are_the_reviewed_set_in_apply_order(self):
+        assert sorted(p.name for p in MIGRATIONS.glob("*.sql")) == ["20260101000000_init_schema.sql", "20260101000100_rls_policies.sql",
+                                                                      "20260102000000_money_integrity.sql", "20260102000100_client_write_hardening.sql"]
+
+    def test_every_test_utility_lists_the_same_migrations(self):
+        from tests.support import pg_migrated
+
+        assert list(pg_migrated.MIGRATION_FILES) == sorted(p.name for p in MIGRATIONS.glob("*.sql"))
+
+    def test_invoices_and_items_become_read_only_for_clients(self):
+        low = _norm(self._sql())
+        assert "drop policy if exists invoices_all on public.invoices" in low and "drop policy if exists invoice_items_all on public.invoice_items" in low
+        assert "create policy invoices_select on public.invoices for select to authenticated" in low
+        assert "create policy invoice_items_select on public.invoice_items for select to authenticated" in low
+        for forbidden in (" for all", " for insert", " for update", " for delete"):
+            assert forbidden not in low
+
+    def test_every_policy_is_dropped_before_it_is_created_so_reruns_work(self):
+        low = _norm(self._sql())
+        names = re.findall(r"create policy (\w+) on", low)
+        assert names
+        for name in names:
+            assert f"drop policy if exists {name} on" in low and low.index(f"drop policy if exists {name} on") < low.index(f"create policy {name} on")
+
+    def test_financial_tables_are_read_only_at_the_grant_level_too(self):
+        low = _norm(self._sql())
+        revoked = re.search(r"revoke all on (.*?) from authenticated;", low).group(1)
+        granted = re.search(r"grant select on (.*?) to authenticated;", low).group(1)
+        expected = {f"public.{t}" for t in READ_ONLY_FOR_CLIENTS}
+        assert {x.strip() for x in revoked.split(",")} == expected and {x.strip() for x in granted.split(",")} == expected
+        assert low.index("revoke all on public.invoices") < low.index("grant select on public.invoices")
+        assert "revoke all on all tables in schema public from anon;" in low
+
+    def test_the_script_has_no_transaction_control_of_its_own(self):
+        assert not re.search(r"(^|;) ?(begin|commit|rollback)\b", _norm(self._sql()))
+
+
+class TestClientWriteHardening:
+    """LIMITS: vanilla PostgreSQL + the shim's roles/auth.uid(). Real Supabase (PostgREST, real default privileges, real JWT claims) is NOT covered."""
+
+    def _ready(self, db: Db, harden: bool = True):
+        db.base()
+        inv_a, ids = seed_legacy_data(db)
+        inv_b = str(uuid.uuid4())
+        db.run("insert into public.invoices (id, user_id, invoice_number, subtotal, total_amount, status) values (%s, %s, 'INV-B', 50, 50, 'pending')", (inv_b, USER_B))
+        db.run("insert into public.invoice_items (invoice_id, description, quantity, unit_price, total) values (%s, 'item a', 1, 100, 100), (%s, 'item b', 1, 50, 50)", (inv_a, inv_b))
+        db.run("insert into public.customers (user_id, name) values (%s, 'Cust A'), (%s, 'Cust B')", (USER_A, USER_B))
+        db.apply(MONEY)
+        if harden:
+            db.apply(HARDEN)
+        return inv_a, inv_b, ids
+
+    def test_control_without_the_hardening_a_client_can_tamper_with_its_invoice(self, db):
+        """Proves the problem and gives the tests below teeth: before 20260102000100 any signed-in user could rewrite their own invoices."""
+        inv_a, _, _ = self._ready(db, harden=False)
+        assert _as(db, "authenticated", USER_A, "update public.invoices set total_amount = 1, version = 99 where id = %s returning id", (inv_a,)) == [(uuid.UUID(inv_a),)]
+        assert len(_as(db, "authenticated", USER_A, "delete from public.invoice_items where invoice_id = %s returning id", (inv_a,))) == 1
+        assert len(_as(db, "authenticated", USER_A, "delete from public.invoices where id = %s returning id", (inv_a,))) == 1  # even the invoice of a paid order
+
+    def test_hardened_clients_still_read_only_their_own_invoices_and_items(self, db):
+        inv_a, inv_b, _ = self._ready(db)
+        assert _as(db, "authenticated", USER_A, "select id from public.invoices") == [(uuid.UUID(inv_a),)]
+        assert _as(db, "authenticated", USER_B, "select id from public.invoices") == [(uuid.UUID(inv_b),)]
+        assert len(_as(db, "authenticated", USER_A, "select id from public.invoice_items")) == 1  # only the items of their own invoice
+
+    def test_hardened_clients_cannot_modify_invoices_or_items(self, db):
+        import psycopg
+        inv_a, inv_b, _ = self._ready(db)
+        cust_b = db.one("select id from public.customers where name = 'Cust B'")[0]
+        attempts = [
+            ("update public.invoices set total_amount = 1 where id = %s", (inv_a,)),
+            ("update public.invoices set status = 'cancelled', version = 99, currency = 'EUR' where id = %s", (inv_a,)),
+            ("update public.invoices set status = 'pending' where id = %s", (inv_a,)),
+            ("update public.invoices set customer_id = %s where id = %s", (cust_b, inv_a)),  # another tenant's customer
+            ("delete from public.invoices where id = %s", (inv_a,)),
+            ("insert into public.invoices (user_id, invoice_number) values (%s, 'FORGED')", (USER_A,)),
+            ("update public.invoice_items set unit_price = 0", None),
+            ("delete from public.invoice_items", None),
+            ("insert into public.invoice_items (invoice_id, description, unit_price, total) values (%s, 'x', 1, 1)", (inv_a,)),
+            ("truncate public.invoices", None),
+            ("truncate public.invoice_items", None),
+        ]
+        for sql, params in attempts:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                _as(db, "authenticated", USER_A, sql, params)
+        assert db.one("select total_amount, status, version from public.invoices where id = %s", (inv_a,)) == (100, "pending", 1)  # nothing changed
+        assert db.one("select count(*) from public.invoice_items")[0] == 2
+
+    def test_hardened_clients_cannot_write_any_other_financial_table(self, db):
+        import psycopg
+        inv_a, _, ids = self._ready(db)
+        for t in ("payment_links", "transactions", "refunds", "audit_logs", "ai_messages"):
+            for sql in (f"update public.{t} set id = id", f"delete from public.{t}", f"truncate public.{t}"):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    _as(db, "authenticated", USER_A, sql)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            _as(db, "authenticated", USER_A, "insert into public.refunds (user_id, transaction_id, provider, provider_refund_id, amount, currency) values (%s, %s, 'paypal', 'FORGED', 1, 'USD')", (USER_A, ids["completed"]))
+        assert len(_as(db, "authenticated", USER_A, "select id from public.transactions")) == 4  # reads are unaffected
+        assert len(_as(db, "authenticated", USER_A, "select id from public.refunds")) == 1  # the legacy refund of A's refunded payment
+        assert _as(db, "authenticated", USER_B, "select id from public.refunds") == []
+
+    def test_tables_the_hardening_does_not_cover_keep_their_client_access(self, db):
+        self._ready(db)
+        assert len(_as(db, "authenticated", USER_A, "insert into public.customers (user_id, name) values (%s, 'New') returning id", (USER_A,))) == 1
+        assert len(_as(db, "authenticated", USER_A, "update public.profiles set business_name = 'Acme' where id = %s returning id", (USER_A,))) == 1
+        assert [r[0] for r in _as(db, "authenticated", USER_A, "select name from public.customers order by name")] == ["Cust A", "New"]
+
+    def test_anon_has_no_access_to_any_table(self, db):
+        import psycopg
+        self._ready(db)
+        for t in READ_ONLY_FOR_CLIENTS + CLIENT_WRITABLE + ("webhook_events",):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                _as(db, "anon", None, f"select * from public.{t}")
+
+    def test_the_backend_owner_path_can_still_write_everything_it_needs(self, db):
+        """The FastAPI backend connects as the table owner (DATABASE_URL), never as a Data-API role. LIMIT: the test connection is a superuser
+        owner on a disposable server; on Supabase the owner is `postgres`. Both own the tables, which is what the privileges rely on."""
+        inv_a, inv_b, ids = self._ready(db)
+        assert db.one("select count(*) from pg_tables where schemaname = 'public' and tableowner <> current_user")[0] == 0
+        db.run("update public.invoices set total_amount = 120, version = version + 1, status = 'paid' where id = %s", (inv_a,))  # a verified payment marks it paid
+        db.run("insert into public.invoice_items (invoice_id, description, quantity, unit_price, total) values (%s, 'extra', 1, 20, 20)", (inv_a,))
+        db.run("delete from public.invoice_items where description = 'extra'")
+        db.run("update public.transactions set status = 'partially_refunded', refunded_amount = 10 where id = %s", (ids["completed"],))
+        db.run("insert into public.refunds (user_id, transaction_id, provider, provider_refund_id, amount, currency, source) values (%s, %s, 'paypal', 'R-OWNER', 10, 'USD', 'api')", (USER_A, ids["completed"]))
+        db.run("update public.refunds set updated_at = now() where provider_refund_id = 'R-OWNER'")
+        db.run("insert into public.audit_logs (user_id, action) values (%s, 'test')", (USER_A,))
+        assert db.one("select status, version from public.invoices where id = %s", (inv_a,)) == ("paid", 2)
+        assert db.one("select count(*) from public.refunds where transaction_id = %s", (ids["completed"],))[0] == 1
+        assert db.one("select count(*) from pg_trigger where tgname = 'trg_guard_invoice_paid' and not tgisinternal")[0] == 1  # defence in depth is still installed
+
+    def test_the_privilege_matrix_is_exactly_as_designed(self, db):
+        self._ready(db)
+        for t in READ_ONLY_FOR_CLIENTS:
+            assert _privs(db, "authenticated", t) == {"SELECT"}, t
+        for t in CLIENT_WRITABLE:
+            assert {"SELECT", "INSERT", "UPDATE", "DELETE"} <= _privs(db, "authenticated", t), t
+        assert _privs(db, "authenticated", "webhook_events") == set()
+        for t in READ_ONLY_FOR_CLIENTS + CLIENT_WRITABLE + ("webhook_events",):
+            assert _privs(db, "anon", t) == set(), t
+            assert {"SELECT", "INSERT", "UPDATE", "DELETE"} <= _privs(db, "service_role", t), t  # the shim's default privileges; the migrations never revoke from it (static test)
+        assert db.one("select relrowsecurity from pg_class where oid = 'public.refunds'::regclass")[0] is True
+        assert sorted(r[0] for r in db.all("select policyname from pg_policies where tablename in ('invoices', 'invoice_items', 'refunds')")) == [
+            "invoice_items_select", "invoices_select", "refunds_select"]
+
+    def test_reruns_change_nothing(self, db):
+        self._ready(db)
+        matrix = lambda: {(t, r): sorted(_privs(db, r, t)) for t in READ_ONLY_FOR_CLIENTS + CLIENT_WRITABLE + ("webhook_events",) for r in ("anon", "authenticated", "service_role")}
+        before_snapshot, before_matrix = snapshot(db), matrix()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        db.apply(HARDEN)
+        assert snapshot(db) == before_snapshot and matrix() == before_matrix
+
+    def test_money_integrity_after_the_hardening_is_still_a_noop_on_policies_and_grants(self, db):
+        """Re-running file 3 after file 4 (the documented post-cutover backfill) must not loosen anything file 4 tightened."""
+        self._ready(db)
+        before = {t: sorted(_privs(db, "authenticated", t)) for t in READ_ONLY_FOR_CLIENTS}
+        db.apply(MONEY)
+        assert {t: sorted(_privs(db, "authenticated", t)) for t in READ_ONLY_FOR_CLIENTS} == before
+
+
+class TestRefundsAreNeverExposedWhileTheMigrationRuns:
+    """A tool that runs the file statement by statement must never leave refunds readable: the lockdown comes right after CREATE TABLE."""
+
+    def _state(self, db: Db):
+        return (db.one("select relrowsecurity from pg_class where oid = 'public.refunds'::regclass")[0],
+                db.one("select has_table_privilege('anon', 'public.refunds', 'select')")[0],
+                db.one("select has_table_privilege('authenticated', 'public.refunds', 'insert') or has_table_privilege('authenticated', 'public.refunds', 'update') "
+                       "or has_table_privilege('authenticated', 'public.refunds', 'delete') or has_table_privilege('authenticated', 'public.refunds', 'truncate')")[0])
+
+    def test_refunds_is_private_before_the_backfill_creates_its_first_row(self, db):
+        db.base()
+        seed_legacy_data(db)
+        sql = MONEY.read_text(encoding="utf-8").replace("\r\n", "\n")
+        head, tail = sql.split(BACKFILL_MARK)
+        db.run(head)  # everything up to and including CREATE TABLE refunds, but not the backfill that inserts rows
+        assert self._state(db) == (True, False, False)
+        assert db.one("select count(*) from public.refunds")[0] == 0
+        db.run(BACKFILL_MARK + tail)
+        assert db.one("select count(*) from public.refunds where source = 'legacy'")[0] == 1
+        assert self._state(db) == (True, False, False)
+
+    def test_the_window_check_has_teeth_without_the_lockdown_the_table_is_open(self, db):
+        """Negative control: the same split on a copy of the file WITHOUT the lockdown block reproduces the original exposure."""
+        db.base()
+        seed_legacy_data(db)
+        sql = MONEY.read_text(encoding="utf-8").replace("\r\n", "\n")
+        start, end = sql.index("-- Lock the new table down IMMEDIATELY."), sql.index("create index if not exists ix_refunds_txn")
+        mutated = sql[:start] + sql[end:]
+        assert "revoke all on public.refunds from anon;" in mutated  # the end-of-file statements are still there; only the early lockdown is gone
+        db.run(mutated.split(BACKFILL_MARK)[0])
+        rls, anon_select, client_write = self._state(db)
+        assert rls is False and anon_select is True and client_write is True
+
+
+# ================================================================== the demo-data function is an owner tool, not a client API
+class TestSeedFunctionIsNotAClientApi:
+    def test_the_seed_file_revokes_execute_from_public_anon_and_authenticated(self):
+        low = _norm(SEED.read_text(encoding="utf-8"))
+        revoke = "revoke execute on function public.seed_paypilot_demo(uuid) from public, anon, authenticated;"
+        assert revoke in low and low.index("create or replace function public.seed_paypilot_demo") < low.index(revoke)
+        assert "grant execute" not in low
+        assert "security definer" not in low  # a definer function would run with the OWNER's rights for whoever can call it
+
+    def test_no_migration_or_seed_statement_revokes_anything_from_service_role(self):
+        for path in list(MIGRATIONS.glob("*.sql")) + [SEED]:
+            for stmt in re.findall(r"revoke [^;]*;", _norm(path.read_text(encoding="utf-8"))):
+                assert "service_role" not in stmt, (path.name, stmt)
+
+    def test_nothing_in_the_app_calls_the_seed_function(self):
+        """If a client workflow ever needed it, this test (and the revoke) must be revisited deliberately."""
+        offenders = [str(p.relative_to(ROOT)) for base in ("backend/app", "frontend/src") for p in (ROOT / base).rglob("*")
+                     if p.is_file() and p.suffix in (".py", ".ts", ".tsx") and "seed_paypilot_demo" in p.read_text(encoding="utf-8", errors="ignore")]
+        assert offenders == []
+
+
+class TestSeedFunctionPermissions:
+    """LIMITS: vanilla PostgreSQL + the shim, whose default privileges mimic Supabase's (functions executable by anon/authenticated/service_role)."""
+
+    def _ready(self, db: Db):
+        db.base()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        db.apply(SEED)
+
+    def test_the_owner_can_run_it_and_it_creates_the_demo_data(self, db):
+        self._ready(db)
+        db.run("insert into auth.users (id, email) values (%s, 'demo@example.com')", (USER_A,))
+        db.run("select public.seed_paypilot_demo(%s)", (USER_A,))
+        counts = db.one("select (select count(*) from public.customers), (select count(*) from public.invoices), (select count(*) from public.invoice_items), "
+                        "(select count(*) from public.transactions)")
+        assert counts == (3, 3, 3, 4)
+
+    def test_clients_cannot_execute_it_the_owner_can_and_service_role_is_left_untouched(self, db):
+        """service_role is deliberately NOT asserted to have EXECUTE: that depends on the project's default privileges (the shim only approximates
+        Supabase's; the real project must be checked). What is asserted is that the seed file's REVOKE does not change service_role at all."""
+        import psycopg
+        db.base()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        seed = SEED.read_text(encoding="utf-8").replace("\r\n", "\n")
+        without_revoke = "\n".join(line for line in seed.split("\n") if not line.startswith("revoke execute on function"))
+        assert without_revoke != seed
+        privilege = lambda role: db.one("select has_function_privilege(%s, 'public.seed_paypilot_demo(uuid)', 'execute')", (role,))[0]
+        db.apply_text(without_revoke)
+        before = {role: privilege(role) for role in ("anon", "authenticated", "service_role")}
+        assert before["anon"] is True and before["authenticated"] is True  # control (shim defaults): without the revoke the function is exposed
+        db.apply(SEED)
+        assert privilege("anon") is False and privilege("authenticated") is False
+        assert privilege("service_role") == before["service_role"]  # untouched, whatever the project's defaults gave it
+        assert privilege(db.one("select current_user")[0]) is True  # the owner
+        assert db.one("select not exists (select 1 from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a "
+                      "where p.oid = 'public.seed_paypilot_demo(uuid)'::regprocedure and a.grantee = 0)")[0] is True  # PUBLIC has no EXECUTE
+        for role in ("anon", "authenticated"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                _as(db, role, USER_A, "select public.seed_paypilot_demo(%s)", (USER_A,))
+        assert db.one("select count(*) from public.customers")[0] == 0  # nothing was written
+
+    def test_rerunning_the_seed_file_keeps_the_revoke(self, db):
+        self._ready(db)
+        db.apply(SEED)
+        db.apply(SEED)
+        assert db.one("select has_function_privilege('anon', 'public.seed_paypilot_demo(uuid)', 'execute') or has_function_privilege('authenticated', 'public.seed_paypilot_demo(uuid)', 'execute')")[0] is False
+
+
+# ================================================================== the signup trigger function is not a client API (but signup still works)
+SIGNUP_REVOKE = "revoke execute on function public.handle_new_user() from public, anon, authenticated;"
+
+
+class TestSignupTriggerFunctionText:
+    def test_the_function_exists_before_the_hardening_runs_and_the_revoke_names_its_exact_signature(self):
+        init = _norm(INIT.read_text(encoding="utf-8"))
+        assert "create or replace function public.handle_new_user() returns trigger" in init  # defined (no arguments) by the first migration
+        assert "execute function public.handle_new_user()" in init  # and attached as the signup trigger there
+        assert SIGNUP_REVOKE in _norm(HARDEN.read_text(encoding="utf-8"))
+        assert INIT.name < HARDEN.name  # applied in filename order
+
+    def test_the_revoke_does_not_name_service_role_or_touch_other_functions(self):
+        revokes = re.findall(r"revoke execute [^;]*;", _norm(HARDEN.read_text(encoding="utf-8")))
+        assert revokes == [SIGNUP_REVOKE]
+
+
+class TestSignupTriggerFunctionPermissions:
+    """LIMITS: vanilla PostgreSQL + the shim (its default privileges mimic Supabase's); the inserting role stands in for supabase_auth_admin."""
+
+    def _text_without_the_revoke(self) -> str:
+        text = HARDEN.read_text(encoding="utf-8").replace("\r\n", "\n")
+        stripped = "\n".join(line for line in text.split("\n") if not line.startswith("revoke execute on function public.handle_new_user()"))
+        assert stripped != text
+        return stripped
+
+    def _roles(self, db: Db):
+        """Two throw-away cluster roles: one with NO grants at all (whatever it can do comes from PUBLIC) and one that may insert into auth.users."""
+        suffix = uuid.uuid4().hex[:8]
+        public_only, inserter = f"pp_pubonly_{suffix}", f"pp_signup_{suffix}"
+        for role in (public_only, inserter):
+            db.run(f"create role {role} nologin")
+        db.run(f"grant usage on schema auth, public to {public_only}, {inserter}")
+        db.run(f"grant insert, select on auth.users to {inserter}")
+        return public_only, inserter
+
+    def _drop_roles(self, db: Db, *roles):
+        db.run("reset role")
+        for role in roles:
+            db.run(f"drop owned by {role}")
+            db.run(f"drop role if exists {role}")
+
+    def _execute(self, db: Db, role: str) -> bool:
+        return db.one("select has_function_privilege(%s, 'public.handle_new_user()', 'execute')", (role,))[0]
+
+    def _signup(self, db: Db, role: str, uid: str, name="New User"):
+        db.run(f"set role {role}")
+        try:
+            db.run("insert into auth.users (id, email, raw_user_meta_data) values (%s, %s, %s::jsonb)", (uid, f"{uid[:8]}@example.com", json.dumps({"full_name": name, "business_name": "Acme"})))
+        finally:
+            db.run("reset role")
+
+    def test_control_without_the_revoke_public_anon_and_authenticated_can_execute_it(self, db):
+        db.base()
+        db.apply(MONEY)
+        db.apply_text(self._text_without_the_revoke())
+        public_only, inserter = self._roles(db)
+        try:
+            assert self._execute(db, "anon") and self._execute(db, "authenticated") and self._execute(db, public_only)  # the exposure the revoke removes
+        finally:
+            self._drop_roles(db, public_only, inserter)
+
+    def test_public_anon_and_authenticated_cannot_execute_it_directly(self, db):
+        import psycopg
+        db.base()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        public_only, inserter = self._roles(db)
+        try:
+            assert not self._execute(db, "anon") and not self._execute(db, "authenticated") and not self._execute(db, public_only)
+            assert self._execute(db, db.one("select current_user")[0])  # the owner keeps it
+            for role in ("anon", "authenticated", public_only):
+                db.run(f"set role {role}")
+                try:
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        db.run("select public.handle_new_user()")
+                finally:
+                    db.run("reset role")
+            assert db.one("select not exists (select 1 from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a "
+                          "where p.oid = 'public.handle_new_user()'::regprocedure and a.grantee = 0)")[0] is True  # no PUBLIC entry
+        finally:
+            self._drop_roles(db, public_only, inserter)
+
+    def test_signup_still_creates_the_profile_for_a_role_that_cannot_execute_the_function(self, db):
+        db.base()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        public_only, inserter = self._roles(db)
+        try:
+            assert not self._execute(db, inserter)  # the inserting role has no EXECUTE on the trigger function ...
+            uid = str(uuid.uuid4())
+            self._signup(db, inserter, uid)  # ... and the signup trigger still fires
+            assert db.one("select email, full_name, business_name from public.profiles where id = %s", (uid,)) == (f"{uid[:8]}@example.com", "New User", "Acme")
+            owner_uid = str(uuid.uuid4())
+            db.run("insert into auth.users (id, email) values (%s, 'owner@example.com')", (owner_uid,))  # and for the owner as well
+            assert db.one("select count(*) from public.profiles where id = %s", (owner_uid,))[0] == 1
+        finally:
+            self._drop_roles(db, public_only, inserter)
+
+    def test_the_migration_stays_rerunnable_and_signup_keeps_working(self, db):
+        db.base()
+        db.apply(MONEY)
+        db.apply(HARDEN)
+        public_only, inserter = self._roles(db)
+        try:
+            before = (self._execute(db, "anon"), self._execute(db, "authenticated"), self._execute(db, public_only), snapshot(db))
+            db.apply(HARDEN)
+            db.apply(HARDEN)
+            db.apply(MONEY)  # the documented post-cutover rerun of file 3 must not re-grant anything either
+            assert (self._execute(db, "anon"), self._execute(db, "authenticated"), self._execute(db, public_only), snapshot(db)) == before
+            assert before[:3] == (False, False, False)
+            uid = str(uuid.uuid4())
+            self._signup(db, inserter, uid)
+            assert db.one("select count(*) from public.profiles where id = %s", (uid,))[0] == 1
+        finally:
+            self._drop_roles(db, public_only, inserter)

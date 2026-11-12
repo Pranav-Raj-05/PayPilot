@@ -858,6 +858,7 @@ EXPECTED_CALL_SITES = {
     "conftest.py": {"create_all()": 1, "init_engine()": 1},                       # SQLite only (literal "sqlite://", asserted below)
     "pg_safety.py": {"connect()": 1, "sql:create database": 1, "sql:drop database": 1},  # the single guarded driver call and the two admin statements
     "support/pg_migrated.py": {"sql:truncate": 1},                                # on the session's verified throw-away database
+    "test_migrations_postgres.py": {"sql:truncate": 5},  # TRUNCATE attempts made as the 'authenticated' role that must be REFUSED, only through the db fixture (connect_verified -> pp_mig_* database)
     "test_money_integrity.py": {"create_all()": 2, "create_engine()": 1, "sql:drop table": 1},  # in-memory SQLite (literal "sqlite://", asserted below)
     "test_pg_test_safety.py": {"connect()": 1},  # the one raw connection: the live tunnel simulation on the disposable server (SQL strings in this file are fakes/assertions)
     "test_profile_concurrency.py": {"create_all()": 1, "drop_all()": 1, "init_engine()": 1},  # _boot only: guard, normalize, verify, then drop_all

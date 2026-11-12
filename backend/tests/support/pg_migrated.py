@@ -5,7 +5,7 @@
 
 WHAT THIS IS (and is not)
   * It builds ONE throw-away database per pytest session (``pg_safety.temp_database("pp_mig")``, always dropped at the end), applies
-    ``tests/support/supabase_shim.sql`` and the three files in ``supabase/migrations`` to it, and then makes the suite's ``client``
+    ``tests/support/supabase_shim.sql`` and the four files in ``supabase/migrations`` to it, and then makes the suite's ``client``
     fixture (which asks for ``init_engine("sqlite://")``) use that database instead of in-memory SQLite.
   * It exercises VANILLA PostgreSQL + a Supabase compatibility shim. It is NOT Supabase: no GoTrue, no PostgREST, no pooler, no real
     ``auth`` schema, no Supabase role grants.
@@ -46,7 +46,8 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 MIGRATIONS = ROOT / "supabase" / "migrations"
 SHIM = pathlib.Path(__file__).with_name("supabase_shim.sql")
-MIGRATION_FILES = ("20260101000000_init_schema.sql", "20260101000100_rls_policies.sql", "20260102000000_money_integrity.sql")
+MIGRATION_FILES = ("20260101000000_init_schema.sql", "20260101000100_rls_policies.sql", "20260102000000_money_integrity.sql",
+                   "20260102000100_client_write_hardening.sql")
 EXCLUDED_MODULES = ("test_migrations_postgres.py",)
 EXCLUDED_FIXTURES = ("postgres_client",)
 _STATE: dict = {}  # engine / admin connection of the running session, shared by the fixtures below

@@ -25,3 +25,9 @@ begin
     (p_user, c1, null, 'paypal', 'SEED-ORDER-003', null, 120, 'USD', 'failed', 'paypal', now() - interval '2 days', '[{"type":"order_created"},{"type":"failed"}]'),
     (p_user, c3, null, 'razorpay', 'SEED-RZP-001', 'SEED-RZP-PAY-001', 5000, 'INR', 'completed', 'upi', now() - interval '1 days', '[{"type":"order_created"},{"type":"captured"}]');
 end $$;
+
+-- This is an operator tool, run by the project owner in the SQL editor; no client workflow calls it. Without this, PUBLIC (PostgreSQL's default) and,
+-- on Supabase, anon and authenticated (through its default privileges for functions) could execute it through the Data API as
+-- /rest/v1/rpc/seed_paypilot_demo. The owner keeps EXECUTE. service_role is deliberately left untouched: whether it can execute depends on the project's
+-- default privileges (confirm on the real project if you rely on it). Rerunning this file is safe: create or replace keeps the privileges and the revoke is idempotent.
+revoke execute on function public.seed_paypilot_demo(uuid) from public, anon, authenticated;
